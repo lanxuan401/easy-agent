@@ -39,6 +39,7 @@ retry:
 
 # ===== Agent =====
 max_steps: ${MAX_STEPS:-100}                      # 单轮最大执行步数
+tool_progress_enabled: ${TOOL_PROGRESS_ENABLED:-true}  # 工具空结果终止提示 + 原地打转提醒（只改结果文本，不改工具行为）
 workspace_dir: "${WORKSPACE_DIR:-/qts/workspace}" # 工作区根目录，实际按用户/会话隔离
 memories_dir: "${MEMORIES_DIR:-/qts/memories}"    # 长期记忆根目录，实际 {memories_dir}/{username}/AGENTS.md
 sessions_dir: "${SESSIONS_DIR:-/qts/sessions}"    # 会话数据目录，实际 {sessions_dir}/{username}/{session_id}.json
@@ -134,6 +135,14 @@ database:
     read_timeout: 30                      # 读超时（秒）
     write_timeout: 30                     # 写超时（秒）
 
+# ===== HITL 审批 checkpoint =====
+checkpoint:
+  # 人工审批断点的 SQLite 文件（官方 AsyncSqliteSaver）。{pod} 启动时换成 pod 名
+  # （EASY_POD_NAME → POD_NAME → HOSTNAME），每个 pod 一个文件；相对路径按项目根解析。
+  # 不配置时默认 /qts/checkpoint/{pod}.db。要放 pod 本地盘，不能放 NAS 等网络盘（SQLite WAL 不能跨主机）。
+  # 本机开发可在 .env.dev 里设 CHECKPOINT_DIR=data/checkpoints。
+  sqlite_path: "${CHECKPOINT_DIR:-/qts/checkpoint}/{pod}.db"
+
 # ===== 人员账号 =====
 personnel:
   self_registration_enabled: false   # 自助注册：true 时登录页显示注册入口
@@ -152,6 +161,18 @@ skill_write: ${SKILL_WRITE:-new-only}  # 技能库写权限：new-only（只可�
 interrupt_sensitive_writes: true       # /memories/**、/user-skills/** 的写入是否走人工审批（需 checkpointer）
 denied_dirs: []                        # 禁读写的虚拟路径；字符串 = 读+写，{path, operations} = 仅指定操作
 
+# ===== 人工审批（HITL）=====
+hitl:
+  enabled: true                  # false：对话里也不审批（和定时任务一样），也不提供创建定时任务的工具
+  # 执行这些工具前要人工审批；不写 tools 时就是下面这份默认名单
+  tools:
+    - execute                    # 只拦删除类命令（rm / unlink / shred 等），删目录直接拒绝
+    - delete                     # 删除文件
+    - save_expert                # 新建 / 修改专家
+    - create_scheduled_task      # 创建定时任务
+    - access_knowledge_original  # 只拦 action=materialize（把知识库原文取到工作区）
+  # MCP 工具写工具名即可（带不带服务前缀都行）；没列出的 MCP 工具仍按服务端标注 / 名字自动判断
+
 # ===== 专家 =====
 expert:
   guardrail_enabled: true            # 在专家提示词末尾追加职责边界
@@ -159,6 +180,7 @@ expert:
   relevance_strict: false            # true = 部分相关也整条拒答；false = 放行只答相关部分
   relevance_disable_thinking: true   # 预检调用关闭思考模式
   auto_install_required_skills: true # 用预置专家时自动「添加」其 required_skills 声明的公共技能（不复制技能包）
+  tool_scope_enabled: true           # 专家选定技能包时做硬隔离：只挂这些技能 + 本轮另选的技能；未选=全量可见
 
 # ===== 专家分类标签（tag_id 落库，tag_name 展示）=====
 expert_tags:
@@ -199,32 +221,54 @@ knowledge:
   api_key: "${RAGFLOW_API_KEY}"
   shared_dataset_id: "${RAGFLOW_SHARED_DATASET_ID:-}"    # 留空按 EA_SHARED 名称查找或创建
   embedding:
-    model: "${RAGFLOW_EMBEDDING_MODEL:-}"                # 留空用 RAGFlow 默认 embedding
+    # 首次使用时会校验共享数据集：空库自动更新模型；有 chunk 且模型不一致时
+    # 自动切换到 EA_SHARED_<模型哈希> 新库（旧库文档需重新上传）。模型 ID 必须
+    # 是 RAGFlow 已注册的完整格式：模型名@实例名@provider名。
+    model: "${RAGFLOW_EMBEDDING_MODEL:-}"
+  # 审计事件记录开关与 details 截断上限
   audit:
     enabled: true                                        # 记录知识库审计事件
     max_details_bytes: 4096                              # 事件 details 截断上限
   limits:
-    max_file_size_mb: 100                                # 单文件大小上限
-    max_request_size_mb: 110                             # 单请求大小上限
-    max_files_per_request: 1                             # 单请求文件数上限
-    max_filename_utf8_bytes: 127                         # 文件名 UTF-8 字节上限
-    allowed_extensions: [pdf, doc, docx, txt, md, xls, xlsx, csv, ppt, pptx]  # 允许的扩展名
-    max_documents_per_query: 500                         # 单次查询文档数上限
-  # 外部目录树同步（默认关闭，按需取消注释）
-  # catalog_sync:
-  #   enabled: ${KNOWLEDGE_CATALOG_SYNC_ENABLED:-false}
-  #   sql_file: "${KNOWLEDGE_CATALOG_SYNC_SQL_FILE}"
-  #   database: "${KNOWLEDGE_CATALOG_SYNC_DATABASE:-ai_kb}"
-  #   owner_username: "admin"
-  #   space_type: "team"          # personal | team
-  #   department_id: ""
-  #   max_level: 5
-  #   mysql:
-  #     host: ""
-  #     port: 3306
-  #     user: ""
-  #     password: ""
-  #     charset: "utf8mb4"
+    max_file_size_mb: 100
+    max_request_size_mb: 110
+    max_filename_utf8_bytes: 127
+    allowed_extensions:
+      - pdf
+      - doc
+      - docx
+      - txt
+      - md
+      - xls
+      - xlsx
+      - csv
+      - ppt
+      - pptx
+    max_documents_per_query: 500
+    # 解析绝对超时（秒）：0 = 不限制；计时从真正开始解析算起，不含上游排队
+    parse_timeout_seconds: ${KNOWLEDGE_PARSE_TIMEOUT_SECONDS:-0}
+  # 研报接入：文档 SQL 增量同步（enabled=true 即启用；mysql 连接/表名按需填写）
+  source_sync:
+    enabled: ${KNOWLEDGE_SOURCE_SYNC_ENABLED:-false}
+    owner_username: "admin"     # 入库归属用户（需已存在，以该用户身份上传并授权）
+    file_root: "${SOURCE_SYNC_FILE_ROOT:-}"  # 磁盘文件根目录（绝对路径，必填）：按文档 SQL 的 batchid 在此目录下匹配同名文件
+    base_id: ""                # 精确指定入库的知识库 ID（同名库有多个时用它锁定）；留空则按 base_name 查找/新建
+    base_name: "报告库"  # 按这个名字找知识库，找不到才新建（新建固定为团队公共库）；base_id 为空时生效
+    lookback_days: 7           # 按 publishDate 取最近 N 天
+    start_date: ""             # 首次回填起始日期 YYYY-MM-DD
+    start_delay_minutes: 0     # 启动后延迟多少分钟执行第一次同步（0 = 启动即执行）
+    interval_minutes: 60       # 两次同步的间隔；0 = 只执行一次（在 start_delay_minutes 之后）
+    max_inflight: 10           # 同时在途（排队/解析中）文档上限
+    poll_interval_seconds: 15  # 轮询在途文档解析状态的间隔（秒）
+    max_attempts: 3            # 单篇文档上传/解析失败后的最大重试次数
+    mysql:
+      host: "${COL_SQL_HOST:-}"         # 研报 SQL 必填，不复用主库
+      port: ${COL_SQL_PORT:-3306}
+      user: "${COL_SQL_USER:-}"
+      password: "${COL_SQL_PASSWORD:-}"
+      database: "${COL_SQL_DB:-}" # 研报 SQL 必填，不复用主库
+      charset: "${COL_SQL_CHARSET:-utf8mb4}"
+      table: "${COL_SQL_TABLE:-}"       # 研报源表名（必填，源库已存在）
 
 # 输入框提示词增强（独立 SDK 调用；仅引用 models.deepseek）
 prompt_enhancement:

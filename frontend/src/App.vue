@@ -11,17 +11,19 @@
         :sessions="sessions"
         :currentSessionId="currentSessionId"
         :streamingSessionIds="streamingSessions"
+        :pendingApprovalSessionIds="pendingApprovalSessions"
         :username="userProfile.username"
         :organizationId="userProfile.organization_id"
         :email="userProfile.email"
-        :showAssets="showAssets"
+        :knowledgeEnabled="knowledgeEnabled"
+        :showKnowledge="showKnowledge"
         @createSession="handleCreateSession"
         @selectSession="handleSelectSession"
         @deleteSession="handleDeleteSession"
         @renameSession="handleRenameSession"
         @togglePin="handleTogglePin"
         @toggleSidebar="toggleSidebar"
-        @showAssets="handleShowAssets"
+        @showKnowledge="handleShowKnowledge"
         @showSkillCenter="handleShowSkillCenter"
         @showScheduledTasks="handleShowScheduledTasks"
         @showSettings="showSettingsPanel = true"
@@ -41,8 +43,6 @@
         </svg>
       </button>
       
-      <AssetsPanel v-if="showAssets" :visible="showAssets" @close="showAssets = false" />
-
       <SkillCenter
         v-if="showSkillCenter"
         :session-id="currentSessionId || ''"
@@ -65,9 +65,16 @@
         v-if="showUserManagementPanel"
         @close="showUserManagementPanel = false"
       />
-      
+
+      <KnowledgeWorkbench
+        v-if="showKnowledge"
+        @close="showKnowledge = false"
+        @manage-personnel="showUserManagementPanel = true"
+        @chat-session-prepared="loadSessions"
+      />
+
       <Chat
-        v-else-if="!showAssets && !showSkillCenter && !showScheduledTasks"
+        v-else-if="!showSkillCenter && !showScheduledTasks"
         :messages="messages"
         :sessionLoading="sessionLoading"
         :currentSessionId="currentSessionId"
@@ -102,11 +109,12 @@
         @reject="handleToolApproval('reject', $event)"
         @edit="handleToolApproval('edit', $event)"
         @clearExpert="selectedExpert = null"
-        @selectExpert="handleUseExpert"
+        @selectExpert="handleSummonExpertInPlace"
         @openPanel="openSkillCenterPanel"
+        @openKnowledge="openKnowledgeWorkbench"
       />
 
-      <div v-if="currentSessionId && !showAssets && !showSkillCenter" class="workspace-area">
+      <div v-if="currentSessionId && !showKnowledge && !showSkillCenter" class="workspace-area">
         <WorkspacePanel
           :username="userProfile.username"
           :currentSessionId="currentSessionId"
@@ -116,6 +124,8 @@
         />
       </div>
 
+      <!-- AI 侧边栏：任意页面可唤起，与主页面共用会话列表 -->
+      <AiSidebar v-if="userProfile.username" :pageContext="aiPageContext" @open-in-main="handleOpenSessionInMain" @open-panel="openSkillCenterPanel" />
       <div v-if="error" class="error-toast">
         {{ error }}
         <button @click="error = null">×</button>
@@ -130,14 +140,17 @@ import { parseMCPResult } from './shared/utils/mcpResult.js'
 import { useSessionFiles } from './features/chat/composables/useSessionFiles.js'
 import { useContextCompaction } from './features/chat/composables/useContextCompaction.js'
 import { API_BASE_URL, APP_WELCOME_TITLE, appRuntime } from './config.js'
-import { ref, computed, onMounted, watch, defineAsyncComponent } from 'vue'
+import { ref, computed, onMounted, watch, toRef, defineAsyncComponent } from 'vue'
 import SessionList from './features/chat/components/SessionList.vue'
 import Chat from './features/chat/components/Chat.vue'
-import AssetsPanel from './features/chat/components/AssetsPanel.vue'
 const SkillCenter = defineAsyncComponent(() => import('./features/skills/components/SkillCenter.vue'))
 const ScheduledTasksPanel = defineAsyncComponent(() => import('./features/tasks/components/ScheduledTasksPanel.vue'))
+const KnowledgeWorkbench = defineAsyncComponent(() => import('./features/knowledge/KnowledgeWorkbench.vue'))
 const UserManagementPanel = defineAsyncComponent(() => import('./features/personnel/components/UserManagementPanel.vue'))
 import Welcome from './features/chat/components/Welcome.vue'
+import AiSidebar from './features/chat/components/AiSidebar.vue'
+import { chatBus, chatStore, syncPendingApprovalFlag } from './features/chat/store/chatStore.js'
+import { useAiSidebarBridge } from './features/chat/composables/useAiSidebarBridge.js'
 import WorkspacePanel from './features/workspace/components/WorkspacePanel.vue'
 const SettingsPanel = defineAsyncComponent(() => import('./features/settings/components/SettingsPanel.vue'))
 import { createSession, listSessions, getChatHistory, deleteSession, sendMessage, resumeStream, renameSession, togglePinSession, getStreamStatus, attachStream } from './api/chat.js'
@@ -145,10 +158,10 @@ import { applyApprovalRequests, buildResumeDecisions, markApprovalDecision, unma
 import { createStreamChunkHandler } from './features/chat/composables/useStreamChunks.js'
 import { uploadFile, deleteFile, getUserProfile } from './api/files.js'
 import { logout as apiLogout, notifyLogout, getStoredToken, getStoredUsername, AUTH_EXPIRED_EVENT, authFetch, passwordlessLogin } from './api/auth.js'
-import { getModels as fetchModels } from './api/settings.js'
-import { getExpertLastSession } from './shared/utils/expertSession.js'
+import { getKnowledgeStatus, getModels as fetchModels } from './api/settings.js'
 
-const sessions = ref([])
+// 会话列表与「进行中」集合放在 chatStore：AI 侧边栏与主页面共用同一份
+const sessions = toRef(chatStore, 'sessions')
 const currentSessionId = ref(null)
 const currentSessionHasFiles = ref(false)
 
@@ -175,6 +188,15 @@ function clearActiveSession() {
 const availableModels = ref([])
 const selectedModel = ref(null)
 const welcomeTitle = ref(APP_WELCOME_TITLE)
+
+async function loadKnowledgeStatus() {
+  try {
+    const data = await getKnowledgeStatus()
+    knowledgeEnabled.value = Boolean(data && data.enabled)
+  } catch (e) {
+    knowledgeEnabled.value = false
+  }
+}
 
 async function loadModels() {
   try {
@@ -214,9 +236,10 @@ async function expandWorkspaceAfterSessionCompletion(sessionId, delayMs = 500) {
 const messages = ref([])
 const sessionLoading = ref(false)
 // 多个会话可同时流式：记录所有正在流式输出的会话 id（会话列表逐个显示"进行中"徽标）
-const streamingSessions = ref([])
+const streamingSessions = toRef(chatStore, 'streamingSessions')
+const pendingApprovalSessions = toRef(chatStore, 'pendingApprovalSessions')
 // 最近开始流式的会话（页面刷新后据此重新挂载）
-const lastStreamingSession = ref(null)
+const lastStreamingSession = toRef(chatStore, 'lastStreamingSession')
 // 输入框状态：当前展示的会话正在流式时才显示停止按钮与 token 用量
 const isStreaming = computed(() => isSessionStreaming(currentSessionId.value))
 // 当前正在流式输出的 assistant 消息 id（组件级，供 handleStop 等跨函数使用；
@@ -375,6 +398,7 @@ async function attachToStreamingSession(sessionId, opts = {}) {
     preStreamDuration: sessionDuration.value,
     initialBlockOrder: 0,
     onApprovalRequired: (data) => {
+      syncPendingApprovalFlag(sessionId, true)
       if (!displayed) return
       pendingApproval.value = {
         threadId: data.thread_id,
@@ -609,6 +633,7 @@ function buildStreamState() {
     markStreaming,
     loadSessions,
     parseMCPResult,
+    onStreamStarted: (sid) => chatBus.emit('stream-started', { sessionId: sid, origin: 'main' }),
   }
 }
 
@@ -723,12 +748,16 @@ function reconstructPendingApproval() {
   // 流式进行中由 onApprovalRequired 管理审批状态，不重建以免覆盖
   if (isStreaming.value) return
   pendingApproval.value = null
-  if (!messages.value || messages.value.length === 0) return
   const sid = currentSessionId.value || ''
+  let found = false
+  if (!messages.value || messages.value.length === 0) {
+    if (sid) syncPendingApprovalFlag(sid, false)
+    return
+  }
   for (let i = messages.value.length - 1; i >= 0; i--) {
     const msg = messages.value[i]
     // 末尾出现用户消息说明已发起新一轮对话，旧的待审批不再阻塞，不重建
-    if (msg.role === 'user') return
+    if (msg.role === 'user') break
     if (msg.role === 'assistant' && msg.pending_approval && msg.pending_approval.thread_id) {
       const threadId = msg.pending_approval.thread_id
       const backendMsgId = sid && threadId.startsWith(sid + '-')
@@ -746,15 +775,18 @@ function reconstructPendingApproval() {
       messages.value[i] = { ...msg, id: backendMsgId, blocks }
       if (hasPending) {
         pendingApproval.value = { threadId, assistantMsgId: backendMsgId }
+        found = true
       }
       break
     }
   }
+  if (sid) syncPendingApprovalFlag(sid, found)
 }
 watch(() => loadedSessionId.value, reconstructPendingApproval)
 const isSidebarCollapsed = ref(false)
 const isWorkspaceCollapsed = ref(true)
-const showAssets = ref(false)
+const knowledgeEnabled = ref(false)
+const showKnowledge = ref(false)
 const showSkillCenter = ref(false)
 const skillCenterTab = ref('experts')
 const selectedExpert = ref(null)
@@ -778,38 +810,47 @@ function toggleSidebar() {
   isSidebarCollapsed.value = !isSidebarCollapsed.value
 }
 
-function handleShowAssets() {
-  showAssets.value = !showAssets.value
-  showSkillCenter.value = false
-  showScheduledTasks.value = false
-}
-
 function openSkillCenterPanel(tab) {
+  if (tab === 'knowledge') return openKnowledgeWorkbench()
+  showKnowledge.value = false
   // 「+」菜单入口：打开面板并直接定位到专家/技能/连接器
   skillCenterTab.value = tab
   showSkillCenter.value = true
 }
 
+// 知识库工作台：与聊天区互斥，打开时收起其他管理面板
+function openKnowledgeWorkbench() {
+  if (!knowledgeEnabled.value) return
+  showKnowledge.value = true
+  showSkillCenter.value = false
+  showScheduledTasks.value = false
+  showSettingsPanel.value = false
+  showUserManagementPanel.value = false
+}
+
+function handleShowKnowledge() {
+  showKnowledge.value = !showKnowledge.value
+  showSkillCenter.value = false
+  showScheduledTasks.value = false
+  showSettingsPanel.value = false
+  showUserManagementPanel.value = false
+}
+
 function handleShowSkillCenter() {
+  showKnowledge.value = false
   showSkillCenter.value = !showSkillCenter.value
-  showAssets.value = false
   showScheduledTasks.value = false
 }
 
 /**
- * 「专家 Tab -> 使用」（及任何来源的专家选中）：把专家挂到当前会话。
+ * 「专家 Tab -> 召唤」（列表卡片 / 详情弹窗 / 示例问题）：**始终新开会话**。
  *
- * 专家之间**不共享同一个会话**：会话记忆（memory.md）、历史消息、摘要与工作区
- * 交付物都绑定在会话上，同一会话里换专家会让上一个专家留下的领域规则继续被注入
- * （实测：先问利率债专家，再切 Java 专家问汇率，模型照着利率债的记忆"汇率拒答"
- * 并照抄了历史里的专家名）。因此这里按「换专家 = 换会话」处理，但**不做成一味
- * 新建**——先看该专家有没有聊过的会话，有就回去，这样对话记录与会话记忆都不丢。
+ * 2026-10-28 口径调整：从专家面板发起的召唤不再跳回该专家的历史会话，
+ * 一律给一个干净的新窗口（会话记忆、历史消息、工作区交付物都绑定在会话上，
+ * 沿用旧会话会让上次对话的上下文渗进本轮）。
+ * 例外：当前已是空白会话（没有任何消息）则就地复用，避免连点召唤堆出空会话。
  *
- * 三种情况：
- * 1. 当前是空会话（用户刚手动新建）→ 尊重这个新窗口，就地使用，不合并到旧会话；
- * 2. 当前会话已有消息 → 若该专家有历史会话就跳过去，没有就新建一个干净会话；
- * 3. 该专家的「最近会话」正是当前会话 → 只切换专家，不做任何跳转。
- *
+ * 「+」号面板的召唤走 handleSummonExpertInPlace，不再进入本函数。
  * 与 frontend-vue2/src/App.vue 的同名函数同构，改动需同步两处。
  */
 async function handleUseExpert(expert, prompt) {
@@ -823,31 +864,39 @@ async function handleUseExpert(expert, prompt) {
   // 详情弹窗点了示例问题：召唤专家的同时把问题回填到输入框（用户确认后发送）
   expertPrompt.value = typeof prompt === 'string' ? prompt : ''
 
-  const expertId = picked.export_agent_id
-  const isBlankSession = messages.value.length === 0
-  const lastSessionId = getExpertLastSession(expertId)
-  // localStorage 里的会话可能已被删除：必须以会话列表为准，否则会跳到空会话
-  const lastSessionAlive =
-    !!lastSessionId && sessions.value.some(s => s.session_id === lastSessionId)
-
-  if (!isBlankSession && lastSessionId !== currentSessionId.value) {
-    if (lastSessionAlive) {
-      // 回到该专家上次的会话（切会话会清空专家选择，返回后统一恢复）
-      await handleSelectSession(lastSessionId)
-    } else {
-      // 该专家还没有（有效的）会话：开一个干净窗口，避免继承上一个专家的上下文
-      await handleCreateSession()
-    }
+  if (messages.value.length > 0) {
+    await handleCreateSession()
   }
 
-  // handleCreateSession / handleSelectSession 会清空专家选择（「切会话不沿用临时
-  // 选择」的既有口径），这里显式恢复成本轮用户刚选中的专家。
+  // handleCreateSession 会清空专家选择（「切会话不沿用临时选择」的既有口径），
+  // 这里显式恢复成本轮用户刚选中的专家。
+  selectedExpert.value = picked
+}
+
+/**
+ * 「+」号面板 -> 专家行的召唤：**留在当前会话**，只挂专家胶囊。
+ *
+ * 2026-10-28 口径调整：+ 面板召唤不再跳转/新建会话；唯一例外是当前会话
+ * 已经召唤了**另一位**专家——换专家 = 换会话（避免两位专家共享同一份
+ * 会话记忆互相污染），此时新建一个干净窗口再挂载。
+ * 与 frontend-vue2/src/App.vue 的同名函数同构，改动需同步两处。
+ */
+async function handleSummonExpertInPlace(expert) {
+  if (!expert || !expert.export_agent_id) return
+  const picked = {
+    export_agent_id: expert.export_agent_id,
+    export_name_cn: expert.export_name_cn,
+    export_version: expert.export_version,
+  }
+  if (selectedExpert.value && selectedExpert.value.export_agent_id !== picked.export_agent_id) {
+    await handleCreateSession()
+  }
   selectedExpert.value = picked
 }
 
 function handleShowScheduledTasks() {
+  showKnowledge.value = false
   showScheduledTasks.value = !showScheduledTasks.value
-  showAssets.value = false
   showSkillCenter.value = false
 }
 
@@ -952,6 +1001,7 @@ async function handleWelcomeCompleted(profile) {
     console.warn('获取模型配置失败:', e)
   }
   loadModels()
+  loadKnowledgeStatus()
   await loadSessions()
   await restoreInitialSession()
 }
@@ -981,7 +1031,7 @@ async function handleLogout() {
     organization_id: '',
     email: ''
   }
-  showAssets.value = false
+  showKnowledge.value = false
   showSkillCenter.value = false
   selectedExpert.value = null
   hasBootstrapped.value = false
@@ -995,6 +1045,7 @@ async function handleUnregister() {
   loadedSessionId.value = null
   sessionStates.value = {}
   messages.value = []
+  showKnowledge.value = false
   userProfile.value = {
     username: '',
     organization_id: '',
@@ -1080,6 +1131,8 @@ async function ensureCurrentSession(initialTitle = '') {
   if (!currentSessionId.value) {
     const newSession = await createSession(initialTitle || '新会话', userProfile.value.username || null)
     currentSessionId.value = newSession.session_id
+    // 附件预建的会话已在当前页面展示，后续 SSE 应直接更新页面消息。
+    loadedSessionId.value = newSession.session_id
     const existingIndex = sessions.value.findIndex(s => s.session_id === newSession.session_id)
     if (existingIndex === -1) {
       const session = {
@@ -1122,7 +1175,6 @@ async function handleExpertCreate() {
 async function handleExpertEdit() {
   const isEmptySession = !currentSessionId.value || messages.value.length === 0
   if (isEmptySession) {
-    showAssets.value = false
     showSkillCenter.value = false
     showScheduledTasks.value = false
     showSettingsPanel.value = false
@@ -1134,7 +1186,7 @@ async function handleExpertEdit() {
 async function handleCreateSession() {
   saveCurrentSessionState()
 
-  showAssets.value = false
+  showKnowledge.value = false
   showSkillCenter.value = false
   selectedExpert.value = null
   showScheduledTasks.value = false
@@ -1155,7 +1207,7 @@ async function handleSelectSession(sessionId) {
   // 保存当前会话状态
   saveCurrentSessionState()
 
-  showAssets.value = false
+  showKnowledge.value = false
   showSkillCenter.value = false
   // 切换会话时不沿用上一个会话的专家选择（选择是当前工作台的临时状态）
   selectedExpert.value = null
@@ -1237,19 +1289,9 @@ async function handleDeleteSession(sessionId) {
     // 清除会话缓存
     delete sessionStates.value[sessionId]
 
+    chatBus.emit('session-removed', { sessionId, origin: 'main' })
     if (currentSessionId.value === sessionId) {
-      // 先清空归属（避免把已删除会话的界面数据再存回缓存），再决定回退到哪个会话
-      currentSessionId.value = null
-      loadedSessionId.value = null
-      messages.value = []
-      const nextId = sessions.value[0]?.session_id || null
-      if (nextId) {
-        // 复用切会话逻辑：加载其历史（含 sessionLoading 骨架屏），而不是留一个空欢迎页
-        await handleSelectSession(nextId)
-      } else {
-        // 没有剩余会话：回到新建会话首页
-        await handleCreateSession()
-      }
+      await fallbackAfterSessionRemoved()
     } else if (loadedSessionId.value === sessionId) {
       loadedSessionId.value = null
     }
@@ -1261,6 +1303,12 @@ async function handleDeleteSession(sessionId) {
     error.value = '删除会话失败'
   }
 }
+
+const { aiPageContext, handleOpenSessionInMain, fallbackAfterSessionRemoved } = useAiSidebarBridge({
+  panels: { showSkillCenter, showScheduledTasks, showSettingsPanel, showUserManagementPanel },
+  userProfile, sessions, currentSessionId, loadedSessionId, messages, sessionUsage, availableModels, selectedModel,
+  sessionStates, attachedStreamingSessions, attachToStreamingSession, handleSelectSession, handleCreateSession,
+})
 
 async function handleRenameSession(sessionId, newTitle) {
   try {
@@ -1290,7 +1338,7 @@ async function handleTogglePin(sessionId) {
   }
 }
 
-async function handleSendMessage(message, files = [], signal, enableDeepThink = true, enableWebSearch = false, skills = [], expertEditId = '') {
+async function handleSendMessage(message, files = [], signal, enableDeepThink = true, enableWebSearch = false, skills = [], expertEditId = '', knowledgeBaseIds = []) {
   if (isCompacting.value) return
   const userMsgId = `user-${Date.now()}`
   const preStreamUsage = { ...sessionUsage.value }
@@ -1378,6 +1426,7 @@ async function handleSendMessage(message, files = [], signal, enableDeepThink = 
       }
     },
     onApprovalRequired: (data) => {
+      syncPendingApprovalFlag(streamSessionId || currentSessionId.value, true)
       pendingApproval.value = { threadId: data.thread_id, assistantMsgId }
       if (assistantMsgId && data.action_requests) {
         const idx = messages.value.findIndex(m => m.id === assistantMsgId)
@@ -1427,7 +1476,9 @@ async function handleSendMessage(message, files = [], signal, enableDeepThink = 
       expertEditId,
       selectedExpert.value && selectedExpert.value.export_agent_id
         ? selectedExpert.value.export_agent_id
-        : ''
+        : '',
+      // 新对话首条消息携带的知识库范围：后端建会话后先落 scope 再检索
+      knowledgeBaseIds && knowledgeBaseIds.length ? { knowledgeBaseIds } : null
     )
 
     await expandWorkspaceAfterSessionCompletion(streamSessionId)
@@ -1476,6 +1527,7 @@ async function handleSendMessage(message, files = [], signal, enableDeepThink = 
   } finally {
     // HITL: 若有审批待处理，保持 isStreaming=true（用户需先审批）
     if (!pendingApproval.value) {
+      syncPendingApprovalFlag(streamSessionId || currentSessionId.value, false)
       const sid = streamSessionId
       const isDisplayed = !sid || sid === loadedSessionId.value
       // 兜底：流已结束（列表"进行中"标记即将移除），若该会话的消息仍标记 loading
@@ -1541,6 +1593,10 @@ async function handleToolApproval(decision, target) {
       pending_approval: null,
       blocks: [...messages.value[msgIdx].blocks],
     }
+    const stillPending = messages.value[msgIdx].blocks.some(
+      b => b.type === 'tool_call' && b.approval_status === 'pending'
+    )
+    syncPendingApprovalFlag(sessionId, stillPending)
   }
 
   const { onChunk } = createStreamChunkHandler(messages, {
@@ -1555,6 +1611,7 @@ async function handleToolApproval(decision, target) {
     })(),
     onApprovalRequired: (data) => {
       // 嵌套审批
+      syncPendingApprovalFlag(sessionId, true)
       pendingApproval.value = {
         threadId: data.thread_id,
         assistantMsgId,
@@ -1606,6 +1663,9 @@ async function handleToolApproval(decision, target) {
     if (idx !== -1) {
       messages.value[idx].loading = false
       messages.value[idx].error = e.message || '恢复执行失败'
+      if (e.status === 409) {
+        messages.value[idx].pending_approval = null
+      }
       messages.value[idx] = { ...messages.value[idx] }
     }
   } finally {
@@ -1614,6 +1674,7 @@ async function handleToolApproval(decision, target) {
     const hasNewApproval = pendingApproval.value && pendingApproval.value !== currentApproval
     if (!hasNewApproval) {
       pendingApproval.value = null
+      syncPendingApprovalFlag(sessionId, false)
       currentAbortController.value = null
       streamingAssistantId.value = null
       const sid = sessionId
@@ -1728,6 +1789,7 @@ onMounted(async () => {
     if (!showWelcome.value) {
       // 拉取可选模型列表（不阻塞会话加载）
       loadModels()
+      loadKnowledgeStatus()
       await loadSessions()
       await restoreInitialSession()
     }
@@ -2724,8 +2786,6 @@ html[data-theme="dark"] .todo-item.in_progress {
 html[data-theme="dark"] .todo-content {
   color: var(--text-primary) !important;
 }
-
-
 
 html[data-theme="dark"] .todo-item.in_progress .todo-content {
   color: var(--text-primary) !important;

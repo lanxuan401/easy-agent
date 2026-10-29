@@ -231,6 +231,7 @@ import {
   getSkillCategories,
 } from '../../../api/skills.js'
 import { DEFAULT_CATEGORY, iconCategoryFor } from '../../../utils/skillCategories.js'
+import { validateSkillZip } from '../../../utils/skillZip.js'
 import SkillIcon from '../../../shared/components/SkillIcon.vue'
 import SkillDetailPanel from './SkillDetailPanel.vue'
 import ToggleSwitch from '../../../shared/components/ToggleSwitch.vue'
@@ -509,6 +510,14 @@ function triggerImport() {
 async function handleImportFile(event) {
   const file = event.target.files?.[0]
   if (!file) return
+  // 上传前置校验：非 zip、或名称不是「小写字母/数字/单个连字符」，当场拦下不发请求
+  const invalid = validateSkillZip(file)
+  if (invalid) {
+    showToast(invalid, 'error')
+    // 清空选择，否则同一个文件再次选中不会触发 change
+    if (fileInputRef.value) fileInputRef.value.value = ''
+    return
+  }
   importing.value = true
   try {
     const result = await importSkill(file)
@@ -659,7 +668,6 @@ onMounted(load)
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  margin-left: auto;
   height: 38px;
   padding: 0 16px;
   border: 1px solid var(--accent-color);
@@ -712,8 +720,12 @@ onMounted(load)
 }
 
 /* ── 「添加技能」下拉菜单 ── */
+/* auto margin 必须放在包裹层上：按钮外面多包了 .add-skill-menu（宽度 = 按钮宽度），
+   把 margin-left:auto 写在按钮上只能在包裹层内部生效，推不动整个包裹层，
+   导致「添加技能」挤在「已安装」右侧、与专家/连接器面板的右对齐不一致。 */
 .add-skill-menu {
   position: relative;
+  margin-left: auto;
 }
 
 .add-skill-menu-list {
@@ -1153,7 +1165,8 @@ onMounted(load)
     max-width: none;
   }
 
-  .action-btn-primary {
+  .add-skill-menu {
+    /* 窄屏换行时不再强行靠右，跟随时序排布 */
     margin-left: 0;
   }
 }
@@ -1222,4 +1235,24 @@ onMounted(load)
     animation: none;
   }
 }
+/* ── 旧浏览器兜底：color-mix() 需要 Chromium 111+ ─────────────────────
+   Edge 92 / Chrome ≤ 110 会把 `background: color-mix(...)` 整条丢弃，hover 时
+   底色退回透明、文字仍是 #fff，「添加技能」按钮看起来"变白消失"。
+   这里用「基色 + 叠一层黑」复现 color-mix(基色 84%~86%, #000)：sRGB 下叠 α 黑
+   与 color-mix(基色 (1-α), #000) 完全等价，所以浅色/暗色主题都不用分别写死颜色。
+   新浏览器 @supports 判定为真，整块跳过，视觉零变化。 */
+@supports not (background: color-mix(in srgb, #000 10%, #fff)) {
+  /* 复现 color-mix(主色 84%, #000)：叠 16% 黑才与新版浏览器完全同色 */
+  .action-btn-primary:hover:not(:disabled) {
+    background-color: var(--accent-color);
+    background-image: linear-gradient(rgba(0, 0, 0, 0.16), rgba(0, 0, 0, 0.16));
+  }
+
+  /* 分类 chip 与「已安装」筛选的选中态：失效后底色全无，只剩主色文字 */
+  .chip.active,
+  .installed-filter.active {
+    background-color: var(--bg-tertiary);
+  }
+}
+
 </style>

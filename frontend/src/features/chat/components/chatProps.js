@@ -80,5 +80,9 @@ export default {
   expertPrompt: {
     type: String,
     default: ''
-  }
+  },
+  // 侧边栏输入框始终贴底，草稿与主页面独立保存。
+  variant: { type: String, default: 'main' },
+  draftKey: { type: String, default: 'easy_agent_input_draft' },
+  showManageEntry: { type: Boolean, default: true }
 }

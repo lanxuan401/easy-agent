@@ -45,10 +45,14 @@ class SessionDetail(BaseModel):
         default_factory=list, description="任务计划列表"
     )
     usage: Optional[dict[str, Any]] = Field(
-        default=None, description="会话累计 token 用量"
+        default=None,
+        description=(
+            "token 用量：最近一次模型调用的输入/输出/思考 token 与上下文占用"
+            "（与流式 token_usage 同口径），elapsed_time / step_count 为会话累计"
+        ),
     )
     context_length: Optional[int] = Field(
-        default=None, description="模型上下文窗口大小"
+        default=None, description="最近一次调用所用模型的上下文窗口（旧消息退回当前默认模型）"
     )
 
 
@@ -73,13 +77,28 @@ class ChatRequest(BaseModel):
         default=False, description="是否开启联网搜索（输入框地球按钮）"
     )
     files: Optional[List[dict]] = Field(default=None, description="上传的文件列表")
+    knowledge_metadata_filter: Optional[dict] = Field(
+        default=None,
+        description=(
+            "会话已绑定知识库时的元数据硬过滤（publish_date_from/to、report_tags、"
+            "report_second_sources、report_title_contains）；不传则全范围检索"
+        ),
+    )
+    knowledge_base_ids: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "本轮选定的知识库范围（新建会话首条消息由前端携带）：后端建会话后先写入"
+            " session_knowledge_scopes 再检索，避免「选知识库」时提前创建空会话。"
+            "已有会话改选知识库仍走 /sessions/{id}/knowledge-scope 接口；不传=不改变"
+        ),
+    )
     model: Optional[str] = Field(
         default=None,
         description="模型名称（config.models 的 key，如 deepseek/glm）。为空时使用 active model",
     )
     page_context: Optional[str] = Field(
         default=None,
-        max_length=8000,
+        max_length=128000,
         description="AI 侧边栏附带的页面/功能上下文（用户唤起 AI 时所在页面的描述），仅提供给模型参考",
     )
     skills: Optional[List[str]] = Field(
@@ -205,10 +224,14 @@ class GetChatHistoryResponse(BaseModel):
     created_at: str = Field(..., description="创建时间")
     updated_at: str = Field(..., description="更新时间")
     usage: Optional[dict[str, Any]] = Field(
-        default=None, description="会话累计 token 用量"
+        default=None,
+        description=(
+            "token 用量：最近一次模型调用的输入/输出/思考 token 与上下文占用"
+            "（与流式 token_usage 同口径），elapsed_time / step_count 为会话累计"
+        ),
     )
     context_length: Optional[int] = Field(
-        default=None, description="模型上下文窗口大小"
+        default=None, description="最近一次调用所用模型的上下文窗口（旧消息退回当前默认模型）"
     )
 
 
@@ -273,19 +296,6 @@ class AuthResponse(BaseModel):
     token_type: str = Field(default="bearer", description="令牌类型")
     username: str = Field(..., description="用户名")
     context_length: int = Field(default=1_000_000, description="模型上下文窗口大小")
-
-
-class FileInfo(BaseModel):
-    filename: str = Field(..., description="文件名")
-    file_path: str = Field(..., description="文件路径")
-    file_type: str = Field(..., description="文件类型")
-    size: int = Field(..., description="文件大小")
-    uploaded_at: str = Field(..., description="上传时间")
-
-
-class FileListResponse(BaseModel):
-    files: List[FileInfo] = Field(default_factory=list, description="文件列表")
-    total: int = Field(..., description="文件总数")
 
 
 class ScheduledTaskInfo(BaseModel):
@@ -372,6 +382,12 @@ class UploadLimitsResponse(BaseModel):
     max_file_size_mb: int
     max_files_per_message: int
     max_total_size_mb: int
+
+
+class KnowledgeStatusResponse(BaseModel):
+    """只暴露知识库是否启用，供侧边栏决定是否显示「知识库」菜单。"""
+
+    enabled: bool
 
 
 class StatusResponse(BaseModel):

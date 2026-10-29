@@ -32,20 +32,19 @@ from starlette.concurrency import run_in_threadpool
 
 from easy_agent.bootstrap.config import AgentConfig
 from easy_agent.db import init_database
-from easy_agent.knowledge_impl import (
-    KNOWLEDGE_IMPL,
+from easy_agent.knowledges.facade import (
     LegacyHostRoutes,
     KnowledgeOperationsRepository,
     audit_metadata,
     metrics,
     resolve_request_id,
     should_audit,
-    shutdown_catalog_sync,
     shutdown_knowledge,
-    startup_catalog_sync,
+    shutdown_source_sync,
     startup_knowledge,
+    startup_source_sync,
 )
-from easy_agent.knowledge_impl import knowledge_router
+from easy_agent.knowledges.facade import knowledge_router
 from easy_agent.knowledges.personnel import router as personnel_router
 from easy_agent.agent.model import create_model
 from easy_agent.models.api import HealthResponse
@@ -56,7 +55,12 @@ from easy_agent.services import (
     get_agent_config,
     init_agent_config,
 )
-from easy_agent.services import init_scheduler, shutdown_scheduler, reload_all_tasks
+from easy_agent.services import (
+    init_scheduler,
+    reload_all_tasks,
+    shutdown_scheduler,
+    start_scheduled_task_reconcile,
+)
 from easy_agent.services.prompt_loader import (
     configure_prompts_dir,
     get_prompts_dir,
@@ -172,6 +176,7 @@ def _start_scheduler() -> None:
         scheduler = init_scheduler()
         scheduler.start()
         reload_all_tasks()
+        start_scheduled_task_reconcile()
         logger.info("✅ 定时任务调度器已启动 (AsyncIOScheduler)")
     except Exception as e:
         logger.warning(f"⚠️ 定时任务调度器启动失败: {e}")
@@ -345,8 +350,8 @@ def _log_public_experts() -> None:
         logger.warning(f"⚠️ 公共专家目录扫描失败: {type(exc).__name__}: {exc}")
 
 
-async def _start_checkpointing(agent_env: str) -> None:
-    """FW-09：默认官方 checkpointer（auto：sqlite → legacy）。
+async def _start_checkpointing(agent_env: str, config) -> None:
+    """FW-09：默认官方 SQLite checkpointer，文件路径取 config.yaml 的 checkpoint.sqlite_path。
 
     两种后端都不能跨副本共享，prod 多副本在启动期 fail-fast（可用
     EASY_ALLOW_LEGACY_CHECKPOINTER=1 显式豁免），配置错误不再被静默吞掉。
@@ -358,7 +363,9 @@ async def _start_checkpointing(agent_env: str) -> None:
     )
 
     try:
-        checkpoint_backend = await start_checkpoint_backend(agent_env=agent_env)
+        checkpoint_backend = await start_checkpoint_backend(
+            sqlite_path=config.checkpoint.sqlite_path, agent_env=agent_env
+        )
         logger.info(f"✅ HITL checkpointer 后端: {checkpoint_backend}")
     except CheckpointDeploymentError:
         raise
@@ -402,7 +409,7 @@ async def _shutdown_services(app) -> None:
         logger.warning(f"关闭 checkpointer 失败: {exc}")
     # 没启动过 worker / 客户端时是空操作
     await shutdown_knowledge(app)
-    await shutdown_catalog_sync(app)
+    await shutdown_source_sync(app)
     _shutdown_app(app)
 
 
@@ -439,9 +446,21 @@ async def lifespan(app: FastAPI):
         runtime_initialization.log_files,
     )
 
+    # 沙箱自检：bwrap / Landlock 的探测结论在启动期就落到日志里，而不是等第一次
+    # execute 才发现落进 fail-closed。探测结果有缓存，后续 shell 后端复用同一结论。
+    # EASY_SANDBOX_STRICT=1 时沙箱不可用直接拒绝启动（放在 DB 初始化之前，避免
+    # fail-fast 时留下未关闭的连接池）。
+    from easy_agent.sandboxing.sandbox import log_sandbox_startup_report
+
+    log_sandbox_startup_report(
+        sandbox_enabled=bool(
+            getattr(getattr(config, "agent", None), "sandbox_enabled", True)
+        ),
+        strict=env_bool("EASY_SANDBOX_STRICT"),
+    )
+
     # 知识库：配置里没有 knowledge 段时按默认配置（未启用）加载，不起 worker
     await startup_knowledge(app, config_path)
-    logger.info(f"📚 知识库实现: {KNOWLEDGE_IMPL}")
 
     if config:
         await _check_llm_connection(config, agent_env=agent_env)
@@ -450,9 +469,8 @@ async def lifespan(app: FastAPI):
     await _recover_stale_runs()
     _check_deployment(agent_env)
 
-    # 外部目录树同步（ai_kb → 知识库板块）：由 knowledge.catalog_sync.enabled
-    # 开关控制，后台执行，失败仅记日志不阻断启动
-    await startup_catalog_sync(app)
+    # 文档 SQL 增量同步（文档 sql → 知识库）：后台执行，失败不阻断启动
+    await startup_source_sync(app)
 
     system_prompt = _prepare_system_prompt(config, config_path)
 
@@ -472,7 +490,7 @@ async def lifespan(app: FastAPI):
 
         _register_execute_profiles(config)
         _log_public_experts()
-        await _start_checkpointing(agent_env)
+        await _start_checkpointing(agent_env, config)
 
         # LangGraph Store 是业务库 SqlStore，首次使用时绑定业务库；先丢掉同一进程里
         # 之前缓存的实例（测试会在一个进程里换着业务库多次启动应用）
@@ -515,18 +533,6 @@ app = FastAPI(
     redoc_url="/docs",
 )
 
-# 跨域访问（CORS）：
-#   - 默认放行所有来源（"*"），兼容开发期跨域直连与同 pod 部署；
-#   - 生产环境如需收紧，设置环境变量 EASY_CORS_ALLOW_ORIGINS 为逗号分隔的可信域名，
-#     例如 "https://app.example.com,https://admin.example.com"。
-_cors_origins = runtime_initialization.environment.cors_allow_origins
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_cors_origins,
-    allow_credentials=_cors_origins != ["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 app.add_middleware(RateLimitMiddleware)
 app.add_middleware(MetricsMiddleware)
 
@@ -711,6 +717,21 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 app.include_router(chat_router)
 app.add_middleware(LegacyHostRoutes)
+
+# 跨域访问（CORS）：
+#   - 默认放行所有来源（"*"），兼容开发期跨域直连与同 pod 部署；
+#   - 生产环境如需收紧，设置环境变量 EASY_CORS_ALLOW_ORIGINS 为逗号分隔的可信域名，
+#     例如 "https://app.example.com,https://admin.example.com"。
+# 必须最后注册（最外层）：限流 429 等由内层中间件直接返回的响应也要带 CORS 头，
+# 否则跨域页面（AI 侧边栏 SDK）只看到 CORS 报错；预检请求也在这里应答，不计入限流。
+_cors_origins = runtime_initialization.environment.cors_allow_origins
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=_cors_origins != ["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 app.include_router(sessions_router)
 app.include_router(files_router)
 app.include_router(auth_router)

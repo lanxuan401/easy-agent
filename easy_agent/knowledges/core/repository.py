@@ -9,21 +9,25 @@ from datetime import UTC, datetime
 from typing import Any
 
 from easy_agent.db.database import Database
+from easy_agent.knowledges.core.models import REFRESHABLE_DOCUMENT_STATUSES
 
 logger = logging.getLogger(__name__)
 
 _BASE_UPDATE_FIELDS = {
     "remote_dataset_id", "name", "description", "status",
-    "deleted_at", "deleted_by", "purge_after", "access_restricted",
+    "deleted_at", "deleted_by", "access_restricted",
 }
 _DOCUMENT_UPDATE_FIELDS = {
     "remote_document_id", "folder_id", "status", "progress", "error_code",
-    "error_message", "deleted_at", "deleted_by", "purge_after",
-    "previous_status", "document_version",
+    "error_message", "deleted_at", "deleted_by",
+    # 业务元数据与解析计时
+    "source", "source_record_id", "batch_id", "report_title", "report_tag",
+    "report_second_source", "publish_date",
+    "parse_started_at",
 }
 _OBJECT_UPDATE_FIELDS = {
     "storage_key", "status", "size_bytes", "sha256", "error_code",
-    "error_message", "stored_at", "quarantined_at", "deleted_at", "last_verified_at",
+    "error_message", "stored_at", "deleted_at",
 }
 _OPERATION_UPDATE_FIELDS = {
     "phase", "status", "current_count", "total_count", "progress",
@@ -89,6 +93,11 @@ class KnowledgeRepository:
         direct_only: bool = False,
         status: str | None = None,
         query: str | None = None,
+        publish_date_from: str | None = None,
+        publish_date_to: str | None = None,
+        report_tags: list[str] | None = None,
+        report_second_sources: list[str] | None = None,
+        report_title_contains: str | None = None,
     ) -> tuple[str, list[object]]:
         clauses = ["d.base_id=?", "d.status!='deleted'"]
         parameters: list[object] = [base_id]
@@ -104,6 +113,24 @@ class KnowledgeRepository:
         if query:
             clauses.append("LOWER(d.name) LIKE ?")
             parameters.append(f"%{query.lower()}%")
+        # 元数据硬过滤：publish_date 为 NULL 的文档不会命中任何日期区间
+        if publish_date_from:
+            clauses.append("d.publish_date >= ?")
+            parameters.append(publish_date_from)
+        if publish_date_to:
+            clauses.append("d.publish_date <= ?")
+            parameters.append(publish_date_to)
+        if report_tags:
+            placeholders = ",".join("?" for _ in report_tags)
+            clauses.append(f"d.report_tag IN ({placeholders})")
+            parameters.extend(report_tags)
+        if report_second_sources:
+            placeholders = ",".join("?" for _ in report_second_sources)
+            clauses.append(f"d.report_second_source IN ({placeholders})")
+            parameters.extend(report_second_sources)
+        if report_title_contains:
+            clauses.append("LOWER(COALESCE(d.report_title, d.name)) LIKE ?")
+            parameters.append(f"%{report_title_contains.lower()}%")
         return " AND ".join(clauses), parameters
 
     def _select_documents_where(self, where: str, params: tuple) -> list[dict[str, Any]]:
@@ -152,6 +179,19 @@ class KnowledgeRepository:
             self.db._execute(cursor, "SELECT * FROM knowledge_bases WHERE id=?", (base_id,))
             return _row_dict(cursor.fetchone())
 
+    def find_base_by_name(self, name: str) -> dict[str, Any] | None:
+        """按名称查找未删除的知识库（同步任务幂等查找）。"""
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            self.db._execute(
+                cursor,
+                "SELECT * FROM knowledge_bases WHERE name=? "
+                "AND status NOT IN ('deleted', 'deleting') "
+                "ORDER BY created_at LIMIT 1",
+                (name,),
+            )
+            return _row_dict(cursor.fetchone())
+
     def list_candidate_bases(
         self,
         *,
@@ -180,7 +220,10 @@ class KnowledgeRepository:
             self.db._execute(
                 cursor,
                 f"""
-                SELECT DISTINCT b.* FROM knowledge_bases b
+                SELECT DISTINCT b.*,
+                       (SELECT COUNT(*) FROM knowledge_documents d
+                        WHERE d.base_id=b.id AND d.status!='deleted') AS document_count
+                FROM knowledge_bases b
                 LEFT JOIN knowledge_permissions p ON p.base_id=b.id
                 WHERE b.status!='deleted' AND (b.owner_user_id=?
                    OR (p.subject_type='user' AND p.subject_id=?)
@@ -203,12 +246,6 @@ class KnowledgeRepository:
     def update_base(self, base_id: str, **fields: object) -> dict[str, Any] | None:
         self._update_by_id("knowledge_bases", base_id, _BASE_UPDATE_FIELDS, fields)
         return self.get_base(base_id)
-
-    def delete_base(self, base_id: str) -> bool:
-        with self.db.get_connection() as conn:
-            cursor = conn.cursor()
-            self.db._execute(cursor, "DELETE FROM knowledge_bases WHERE id=?", (base_id,))
-            return cursor.rowcount > 0
 
     def count_documents(self, base_id: str) -> int:
         return self._count(
@@ -448,6 +485,13 @@ class KnowledgeRepository:
         created_by: str,
         status: str = "pending",
         document_id: str | None = None,
+        source: str | None = None,
+        source_record_id: str | None = None,
+        batch_id: str | None = None,
+        report_title: str | None = None,
+        report_tag: str | None = None,
+        report_second_source: str | None = None,
+        publish_date: str | None = None,
     ) -> dict[str, Any]:
         document_id = document_id or str(uuid.uuid4())
         timestamp = _now()
@@ -459,15 +503,52 @@ class KnowledgeRepository:
                 INSERT INTO knowledge_documents
                     (id, remote_document_id, base_id, folder_id, name,
                      content_type, size_bytes, status, progress, error_code,
-                     error_message, created_by, created_at, updated_at)
-                VALUES (?, NULL, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?)
+                     error_message, created_by, created_at, updated_at,
+                     source, source_record_id, batch_id, report_title, report_tag,
+                     report_second_source, publish_date)
+                VALUES (?, NULL, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     document_id, base_id, folder_id, name, content_type,
                     size_bytes, status, created_by, timestamp, timestamp,
+                    source, source_record_id, batch_id, report_title, report_tag,
+                    report_second_source, publish_date,
                 ),
             )
         return self.get_document(document_id)
+
+    def find_document_by_source_record(
+        self,
+        source: str,
+        source_record_id: str,
+        *,
+        base_id: str | None = None,
+        include_deleted: bool = False,
+    ) -> dict[str, Any] | None:
+        """按业务来源 + 源记录 ID 查本地文档（同步幂等判定）。
+
+        ``base_id`` 非空时只在该知识库内查找（同步目标库判定）：同一业务记录
+        在旧库（已删除）的历史行不应被当作“已入库”，否则新库永远补不回文档。
+        ``include_deleted`` 为真时一并返回软删除行，供调用方决定是跳过还是
+        重新入库（同库内软删除行仍占用幂等键）。
+        """
+        clauses = ["d.source=?", "d.source_record_id=?"]
+        parameters: list[object] = [source, source_record_id]
+        if base_id is not None:
+            clauses.append("d.base_id=?")
+            parameters.append(base_id)
+        if not include_deleted:
+            clauses.append("d.status!='deleted'")
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            self.db._execute(
+                cursor,
+                f"{_DOCUMENT_SELECT} WHERE {' AND '.join(clauses)} "
+                "ORDER BY d.created_at DESC LIMIT 1",
+                tuple(parameters),
+            )
+            return _row_dict(cursor.fetchone())
 
     def get_document(self, document_id: str) -> dict[str, Any] | None:
         with self.db.get_connection() as conn:
@@ -485,11 +566,25 @@ class KnowledgeRepository:
         direct_only: bool = False,
         status: str | None = None,
         query: str | None = None,
+        publish_date_from: str | None = None,
+        publish_date_to: str | None = None,
+        report_tags: list[str] | None = None,
+        report_second_sources: list[str] | None = None,
+        report_title_contains: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
         where, parameters = self._document_filters(
-            base_id, folder_id=folder_id, direct_only=direct_only, status=status, query=query
+            base_id,
+            folder_id=folder_id,
+            direct_only=direct_only,
+            status=status,
+            query=query,
+            publish_date_from=publish_date_from,
+            publish_date_to=publish_date_to,
+            report_tags=report_tags,
+            report_second_sources=report_second_sources,
+            report_title_contains=report_title_contains,
         )
         return self._select_documents_where(
             f"{where} ORDER BY d.updated_at DESC LIMIT ? OFFSET ?",
@@ -504,9 +599,23 @@ class KnowledgeRepository:
         direct_only: bool = False,
         status: str | None = None,
         query: str | None = None,
+        publish_date_from: str | None = None,
+        publish_date_to: str | None = None,
+        report_tags: list[str] | None = None,
+        report_second_sources: list[str] | None = None,
+        report_title_contains: str | None = None,
     ) -> int:
         where, parameters = self._document_filters(
-            base_id, folder_id=folder_id, direct_only=direct_only, status=status, query=query
+            base_id,
+            folder_id=folder_id,
+            direct_only=direct_only,
+            status=status,
+            query=query,
+            publish_date_from=publish_date_from,
+            publish_date_to=publish_date_to,
+            report_tags=report_tags,
+            report_second_sources=report_second_sources,
+            report_title_contains=report_title_contains,
         )
         return self._count(
             f"SELECT COUNT(*) AS count FROM knowledge_documents d WHERE {where}",
@@ -521,6 +630,42 @@ class KnowledgeRepository:
     ) -> list[dict[str, Any]]:
         return self._get_documents_by_column(base_id, "d.remote_document_id", remote_document_ids)
 
+    def list_refreshable_base_ids(self) -> list[str]:
+        """仍有待刷新解析状态文档的知识库 ID。
+
+        只统计已经有远端副本且处于 pending/processing 的文档；本地 pending
+        但尚未拿到远端 ID（上传中断）不属于可轮询范围。
+        """
+
+        placeholders = ", ".join("?" for _ in REFRESHABLE_DOCUMENT_STATUSES)
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            self.db._execute(
+                cursor,
+                "SELECT DISTINCT base_id FROM knowledge_documents "
+                "WHERE remote_document_id IS NOT NULL AND remote_document_id != '' "
+                f"AND status IN ({placeholders}) ORDER BY base_id",
+                REFRESHABLE_DOCUMENT_STATUSES,
+            )
+            return [
+                str(row["base_id"] if isinstance(row, dict) else row[0])
+                for row in cursor.fetchall()
+            ]
+
+    def list_refreshable_documents(
+        self, base_id: str, *, limit: int = 500
+    ) -> list[dict[str, Any]]:
+        """某知识库中需要向上游刷新状态的文档（已有远端副本的 pending/processing）。"""
+
+        placeholders = ", ".join("?" for _ in REFRESHABLE_DOCUMENT_STATUSES)
+        return self._select_documents_where(
+            "d.base_id=? AND d.remote_document_id IS NOT NULL "
+            "AND d.remote_document_id != '' "
+            f"AND d.status IN ({placeholders}) "
+            "ORDER BY d.updated_at DESC LIMIT ?",
+            (base_id, *REFRESHABLE_DOCUMENT_STATUSES, limit),
+        )
+
     def _get_documents_by_column(
         self, base_id: str, column: str, values: Iterable[str]
     ) -> list[dict[str, Any]]:
@@ -533,15 +678,12 @@ class KnowledgeRepository:
             (base_id, *values),
         )
 
-    def list_purgeable_documents(
-        self, now_iso: str, *, limit: int = 100
-    ) -> list[dict[str, Any]]:
-        """软删除保留期已到、仍持有远端副本的文档（含所属库已删除到期的）。
+    def list_purgeable_documents(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        """仍持有远端副本的软删除文档（含所属库已删除的）。
 
-        两类命中：文档自身 status=deleted 且 purge_after 到期；所属库
-        status∈(deleted, deleting) 且库 purge_after 到期（删库时文档未逐个
-        软删除，按库的保留期统一清理远端副本）。purge_after 为 ISO 字符串，
-        同格式下字符串比较与时序一致。
+        两类命中：文档自身 status='deleted'；所属库 status∈(deleted, deleting)。
+        正常删除路径已同步删除远端副本，本方法供清理 worker 兜底同步失败与
+        历史遗留数据，不再按保留期等待。
         """
         sql = """
             SELECT d.id AS document_id, d.base_id, d.remote_document_id,
@@ -550,23 +692,108 @@ class KnowledgeRepository:
             JOIN knowledge_bases b ON b.id = d.base_id
             WHERE d.remote_document_id IS NOT NULL
               AND d.remote_document_id != ''
-              AND (
-                    (d.status = 'deleted'
-                     AND d.purge_after IS NOT NULL AND d.purge_after <= ?)
-                 OR (b.status IN ('deleted', 'deleting')
-                     AND b.purge_after IS NOT NULL AND b.purge_after <= ?)
-                  )
+              AND (d.status = 'deleted'
+                   OR b.status IN ('deleted', 'deleting'))
             ORDER BY d.updated_at
             LIMIT ?
         """
         with self.db.get_connection() as conn:
             cursor = conn.cursor()
-            self.db._execute(cursor, sql, (now_iso, now_iso, limit))
+            self.db._execute(cursor, sql, (limit,))
             return [dict(row) for row in cursor.fetchall()]
 
     def update_document(self, document_id: str, **fields: object) -> dict[str, Any] | None:
         self._update_by_id("knowledge_documents", document_id, _DOCUMENT_UPDATE_FIELDS, fields)
         return self.get_document(document_id)
+
+    # ---------------- 文档 SQL 同步台账 ----------------
+
+    def create_or_get_sync_item(
+        self, *, source: str, source_record_id: str, publish_date: str | None
+    ) -> dict[str, Any]:
+        """幂等创建同步台账行；已存在时直接返回现有行。"""
+        item_id = str(uuid.uuid4())
+        timestamp = _now()
+        try:
+            with self.db.get_connection() as conn:
+                cursor = conn.cursor()
+                self.db._execute(
+                    cursor,
+                    """
+                    INSERT INTO knowledge_source_sync_items
+                        (id, source, source_record_id, document_id, status,
+                         attempts, last_error, publish_date, created_at, updated_at)
+                    VALUES (?, ?, ?, NULL, 'queued', 0, NULL, ?, ?, ?)
+                    """,
+                    (item_id, source, source_record_id, publish_date, timestamp, timestamp),
+                )
+        except Exception:  # noqa: BLE001 — UNIQUE 冲突：并发/重跑时复用已有行
+            existing = self.get_sync_item(source, source_record_id)
+            if existing is None:
+                raise
+            return existing
+        return self.get_sync_item(source, source_record_id) or {}
+
+    def get_sync_item(self, source: str, source_record_id: str) -> dict[str, Any] | None:
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            self.db._execute(
+                cursor,
+                "SELECT * FROM knowledge_source_sync_items "
+                "WHERE source=? AND source_record_id=?",
+                (source, source_record_id),
+            )
+            return _row_dict(cursor.fetchone())
+
+    def update_sync_item(self, item_id: str, **fields: object) -> None:
+        allowed = {"document_id", "status", "attempts", "last_error", "publish_date"}
+        updates = {key: value for key, value in fields.items() if key in allowed}
+        if not updates:
+            return
+        updates["updated_at"] = _now()
+        assignments = ", ".join(f"{column}=?" for column in updates)
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            self.db._execute(
+                cursor,
+                f"UPDATE knowledge_source_sync_items SET {assignments} WHERE id=?",
+                (*updates.values(), item_id),
+            )
+
+    def list_sync_items(
+        self, *, source: str, statuses: Iterable[str], limit: int = 100
+    ) -> list[dict[str, Any]]:
+        statuses = list(dict.fromkeys(statuses))
+        if not statuses:
+            return []
+        placeholders = ",".join("?" for _ in statuses)
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            self.db._execute(
+                cursor,
+                "SELECT * FROM knowledge_source_sync_items "
+                f"WHERE source=? AND status IN ({placeholders}) "
+                "ORDER BY updated_at LIMIT ?",
+                (source, *statuses, limit),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
+    def count_sync_items(self, *, source: str) -> dict[str, int]:
+        """按状态统计同步台账（用于完整性核对：总数 = 各状态之和）。"""
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            self.db._execute(
+                cursor,
+                "SELECT status, COUNT(*) AS count FROM knowledge_source_sync_items "
+                "WHERE source=? GROUP BY status",
+                (source,),
+            )
+            return {
+                str(row["status"] if isinstance(row, dict) else row[0]): int(
+                    row["count"] if isinstance(row, dict) else row[1]
+                )
+                for row in cursor.fetchall()
+            }
 
     # ---------------- 原始文件对象 ----------------
 
@@ -624,46 +851,6 @@ class KnowledgeRepository:
         )
         return self.get_original_object(document_id)
 
-    def create_original_access_audit(
-        self,
-        *,
-        user_id: str,
-        session_id: str,
-        agent_id: str,
-        document_id: str,
-        action: str,
-        result: str,
-        request_id: str = "",
-    ) -> dict[str, Any]:
-        audit_id = str(uuid.uuid4())
-        created_at = _now()
-        with self.db.get_connection() as conn:
-            cursor = conn.cursor()
-            self.db._execute(
-                cursor,
-                """
-                INSERT INTO knowledge_original_access_audit
-                    (id, user_id, session_id, agent_id, document_id,
-                     action, result, request_id, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    audit_id, user_id, session_id, agent_id, document_id,
-                    action, result, request_id, created_at,
-                ),
-            )
-        return {
-            "id": audit_id,
-            "user_id": user_id,
-            "session_id": session_id,
-            "agent_id": agent_id,
-            "document_id": document_id,
-            "action": action,
-            "result": result,
-            "request_id": request_id,
-            "created_at": created_at,
-        }
-
     # ---------------- 权限 ----------------
 
     def list_permissions(self, base_id: str) -> list[dict[str, Any]]:
@@ -673,6 +860,23 @@ class KnowledgeRepository:
                 cursor,
                 "SELECT * FROM knowledge_permissions WHERE base_id=? ORDER BY subject_type, subject_id",
                 (base_id,),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
+    def list_permissions_for_bases(self, base_ids: Iterable[str]) -> list[dict[str, Any]]:
+        """批量查询多个知识库的授权行，避免列表页逐库查询。"""
+
+        ids = list(dict.fromkeys(base_ids))
+        if not ids:
+            return []
+        placeholders = ",".join("?" for _ in ids)
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            self.db._execute(
+                cursor,
+                f"SELECT * FROM knowledge_permissions WHERE base_id IN ({placeholders}) "
+                "ORDER BY base_id, subject_type, subject_id",
+                tuple(ids),
             )
             return [dict(row) for row in cursor.fetchall()]
 
@@ -771,29 +975,6 @@ class KnowledgeRepository:
         with self.db.get_connection() as conn:
             cursor = conn.cursor()
             self.db._execute(cursor, "SELECT * FROM knowledge_operations WHERE id=?", (operation_id,))
-            return _row_dict(cursor.fetchone())
-
-    def get_active_document_operation(self, document_id: str) -> dict[str, Any] | None:
-        """文档最新一条未完成的 upload/parse 操作。"""
-        return self._latest_document_operation(document_id, active_only=True)
-
-    def get_latest_document_operation(self, document_id: str) -> dict[str, Any] | None:
-        """文档最新一条操作（含已超时的历史操作）。"""
-        return self._latest_document_operation(document_id, active_only=False)
-
-    def _latest_document_operation(self, document_id: str, *, active_only: bool) -> dict[str, Any] | None:
-        status_sql = " AND status IN ('accepted', 'running')" if active_only else ""
-        with self.db.get_connection() as conn:
-            cursor = conn.cursor()
-            self.db._execute(
-                cursor,
-                f"""
-                SELECT * FROM knowledge_operations
-                WHERE resource_type='document' AND resource_id=?{status_sql}
-                ORDER BY created_at DESC LIMIT 1
-                """,
-                (document_id,),
-            )
             return _row_dict(cursor.fetchone())
 
     def update_operation(self, operation_id: str, **fields: object) -> dict[str, Any] | None:

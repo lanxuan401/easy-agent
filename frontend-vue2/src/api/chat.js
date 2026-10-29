@@ -1,4 +1,5 @@
 import request, {
+  fetchWithAuth,
   handleStreamResponse,
   streamHeaders,
   streamUrl,
@@ -85,7 +86,7 @@ export async function attachStream(sessionId, onChunk, signal) {
   const controller = new AbortController()
   const abortSignal = signal || controller.signal
   const response = await handleStreamResponse(
-    await fetch(streamUrl(`/agent/chat/stream/live?session_id=${encodeURIComponent(sessionId)}`), {
+    await fetchWithAuth(streamUrl(`/agent/chat/stream/live?session_id=${encodeURIComponent(sessionId)}`), {
       signal: abortSignal,
       headers: streamHeaders(),
     })
@@ -93,7 +94,7 @@ export async function attachStream(sessionId, onChunk, signal) {
   await readSSE(response, onChunk, { signal: abortSignal })
 }
 
-export async function sendMessage(sessionId, message, onChunk, signal, enableDeepThink = true, files = [], model = null, enableWebSearch = false, pageContext = null, skills = [], pendingExpertId = '', expertAgentId = '') {
+export async function sendMessage(sessionId, message, onChunk, signal, enableDeepThink = true, files = [], model = null, enableWebSearch = false, pageContext = null, skills = [], pendingExpertId = '', expertAgentId = '', extra = null) {
   const controller = new AbortController()
   const abortSignal = signal || controller.signal
   const payload = {
@@ -117,9 +118,18 @@ export async function sendMessage(sessionId, message, onChunk, signal, enableDee
   // 本轮使用的专家（我的专家 ID / 公共专家目录名）：专家对话只有一个入口，
   // 后端据此加载提示词、补装依赖技能、做职责范围预检（命中即短路拒答）
   if (expertAgentId) payload.expert_agent_id = expertAgentId
+  // 知识库问答的元数据硬过滤（日期区间/标签/来源），后端只在命中范围内检索
+  if (extra && extra.knowledgeMetadataFilter) {
+      payload.knowledge_metadata_filter = extra.knowledgeMetadataFilter
+  }
+  // 新对话首条消息携带的知识库范围：后端建会话后先落 scope 再检索，
+  // 避免“选知识库”阶段提前创建空会话（已有会话仍走 knowledge-scope 接口）
+  if (extra && Array.isArray(extra.knowledgeBaseIds) && extra.knowledgeBaseIds.length) {
+      payload.knowledge_base_ids = extra.knowledgeBaseIds
+  }
 
   const response = await handleStreamResponse(
-    await fetch(streamUrl('/agent/chat/stream'), {
+    await fetchWithAuth(streamUrl('/agent/chat/stream'), {
       method: 'POST',
       headers: streamHeaders(),
       body: JSON.stringify(payload),
@@ -140,7 +150,7 @@ export async function resumeStream(
   const controller = new AbortController()
   const abortSignal = signal || controller.signal
   const response = await handleStreamResponse(
-    await fetch(streamUrl('/agent/chat/resume'), {
+    await fetchWithAuth(streamUrl('/agent/chat/resume'), {
       method: 'POST',
       headers: streamHeaders(),
       body: JSON.stringify({

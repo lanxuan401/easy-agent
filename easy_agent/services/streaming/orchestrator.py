@@ -49,6 +49,7 @@ from easy_agent.services.stream_messages import (
 )
 from easy_agent.services.stream_processor import StreamProcessor
 from easy_agent.services.session_thread import (
+    StaleApprovalError,
     approval_handle,
     plan_turn,
     record_turn_checkpoint,
@@ -58,7 +59,6 @@ from easy_agent.services.streaming.persistence import (
     persist_approval_decisions,
     persist_final_message,
     persist_partial,
-    persist_thinking_event,
     persist_todos,
     persist_tool_result_event,
     write_session_context_snapshot,
@@ -84,6 +84,29 @@ from easy_agent.services.streaming.side_effects import (
 )
 
 logger = logging.getLogger("easy_agent.chat_service")
+
+#: 主代理模型调用次数用尽时的对外文案。
+#:
+#: 原始异常文本是 ``Model call limits exceeded: run limit (100/100)``——``run limit``
+#: 对业务方没有任何意义，还容易被当成系统故障。日志里仍保留原始异常与堆栈，
+#: 只有给用户/调用方看的那一句换掉。
+LIMIT_EXCEEDED_MESSAGE = "执行步数用尽，请缩小分析范围或明确数据位置"
+
+try:  # 旧版 langchain 没有该中间件；导入失败时按普通异常处理
+    from langchain.agents.middleware.model_call_limit import (
+        ModelCallLimitExceededError as _ModelCallLimitExceededError,
+    )
+except ImportError:  # pragma: no cover - 依赖版本兜底
+    _ModelCallLimitExceededError = None  # type: ignore[assignment]
+
+
+def friendly_error_message(exc: BaseException) -> str:
+    """超限异常换成可读文案，其余异常原样返回（保留类型与细节，便于排查）。"""
+    if _ModelCallLimitExceededError is not None and isinstance(
+        exc, _ModelCallLimitExceededError
+    ):
+        return LIMIT_EXCEEDED_MESSAGE
+    return str(exc)
 
 
 @dataclass
@@ -195,16 +218,6 @@ async def pump_stream(
                     agent=agent,
                     sid=sid,
                 )
-            elif ev_type == "thinking_end":
-                await run_blocking(
-                    persist_thinking_event,
-                    ev,
-                    proc=proc,
-                    db=db,
-                    session_id=session_id,
-                    message_id=message_id,
-                    sid=sid,
-                )
             elif ev_type == "todo_list":
                 await run_blocking(persist_todos, db, session_id, ev["todos"], sid)
             elif ev_type == "content":
@@ -263,6 +276,10 @@ async def plan_resume_for_agent(
         return ResumePlan(
             resume={"decisions": [dict(d) for d in decisions or [] if isinstance(d, dict)]},
             legacy=True,
+        )
+    if not interrupts:
+        raise StaleApprovalError(
+            "找不到这条审批的状态（可能在另一个实例上，或已过期），请重新发送消息"
         )
     plan = plan_resume(interrupts, decisions)
     if len(interrupts) > 1:
@@ -385,6 +402,7 @@ async def finalize_stream(
             elapsed_time=elapsed_time,
             step_count=current_step,
             result_limit=None,
+            context_length=context_length,
         ),
     )
 
@@ -677,10 +695,10 @@ async def chat_stream_generator(
         for blk in reversed(blocks):
             if blk.get("type") == "tool_call" and blk.get("duration") is None:
                 blk["success"] = False
-                blk["result"] = f"执行中断: {str(e)[:result_log_truncate]}"
+                blk["result"] = f"执行中断: {friendly_error_message(e)[:result_log_truncate]}"
                 blk["duration"] = 0
                 break
-        yield emitter.error(f"处理失败: {str(e)}")
+        yield emitter.error(f"处理失败: {friendly_error_message(e)}")
 
 async def resume_stream_generator(
     db: Database,
@@ -744,6 +762,10 @@ async def resume_stream_generator(
     except HitlDecisionError as e:
         logger.warning(f"[{sid}] HITL 恢复: 审批决策无效: {e}")
         yield emitter.error(f"审批决策无效：{e}")
+        return
+    except StaleApprovalError as e:
+        logger.warning(f"[{sid}] HITL 恢复: 审批已不在本实例: {e}")
+        yield emitter.error(str(e))
         return
 
     # 将审批决策立即应用到内存中的 blocks / tool_call_records：
@@ -937,4 +959,4 @@ async def resume_stream_generator(
             start_time=start_time,
             with_approval=True,
         )
-        yield emitter.error(f"处理失败: {str(e)}")
+        yield emitter.error(f"处理失败: {friendly_error_message(e)}")

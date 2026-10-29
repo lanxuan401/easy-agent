@@ -154,6 +154,10 @@ class ToolBuildContext:
     expert_session: bool = False
     web_search_tool: Any = None
     edit_targets: Mapping[str, str] | None = None
+    #: 会话 → 本轮输入框选中的技能目录名（``{session_id: [dir_name, ...]}``）。
+    #: ``save_expert`` 用它把技能包写进专家的 ``export_required_skills``——技能胶囊
+    #: 只在请求体的 ``skills`` 字段里，工具侧看不到，必须由装配根暂存一份。
+    turn_skills: Mapping[str, list[str]] | None = None
     # 工具工厂（按工具名索引），由装配根 ``agent_manager._tool_factories()`` 提供。
     # 注册表刻意不 import tools/knowledge 模块，保持包内无 import 边的叶子模块，
     # 避免把 tools.registry 并进既有 knowledge→scheduler→agent_manager SCC。
@@ -173,8 +177,10 @@ def _scheduled_task_enabled(ctx: ToolBuildContext) -> bool:
 
 
 def _save_expert_enabled(ctx: ToolBuildContext) -> bool:
-    # DA-13：非专家会话都注入，但它是 skill_gated 工具，模型读到 / pin 了 expert-creator 才出现；
-    # 改造前按「本轮是否选中 expert-creator」决定注不注入，切换时要重建 Agent。
+    # 非专家会话都注入，且**不参与技能门控**：创建专家的入口是产品级的，不能依赖用户手里
+    # 那份 expert-creator 技能的 frontmatter 写成什么样。DA-13 曾把它交给技能带出，结果
+    # 升级前整份复制到用户目录的旧副本（frontmatter 没有 metadata.include_tools）永远
+    # 披露不出这个工具，「新建专家」直接不可用。见 agent/core.py 的 _ALWAYS_AVAILABLE_TOOLS。
     return not ctx.expert_session
 
 
@@ -233,6 +239,7 @@ def _build_save_expert_tool(ctx: ToolBuildContext) -> Any:
         config_model=ctx.model_name or "",
         tag_options=getattr(ctx.config, "expert_tags", None),
         edit_targets=ctx.edit_targets or {},
+        turn_skills=ctx.turn_skills or {},
     )
     logger.info(f"[{ctx.sid}] 🧑‍🔬 已注入 save_expert 工具")
     return tool
@@ -365,10 +372,9 @@ TOOL_REGISTRY: tuple[ToolSpec, ...] = (
         interrupt_decisions=("approve", "edit", "reject"),
         hitl_order=10,
         inject_order=30,
-        condition_note="非专家会话；由 expert-creator 技能的 include_tools 带出（skill_gated）",
+        condition_note="非专家会话（产品级入口，不参与技能门控）",
         condition=_save_expert_enabled,
         builder=_build_save_expert_tool,
-        skill_gated=True,
     ),
     ToolSpec(
         name="read_uploaded_file",

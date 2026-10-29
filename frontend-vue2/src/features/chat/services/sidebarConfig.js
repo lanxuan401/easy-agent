@@ -6,7 +6,7 @@ export const RAIL_WIDTH = 52
 // 小于该宽度的视口强制悬浮全宽显示
 export const NARROW_VIEWPORT = 768
 export const MAX_PAGE_SESSIONS = 20
-export const QUOTE_MAX = 2000
+export const QUOTE_MAX = 32000
 export const DEFAULT_FEATURES = {
   launcher: true,
   selectionAsk: true,

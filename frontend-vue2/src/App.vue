@@ -27,7 +27,7 @@
         :username="userProfile.username"
         :organizationId="userProfile.organization_id"
         :email="userProfile.email"
-        :showAssets="showAssets"
+        :knowledgeEnabled="knowledgeEnabled"
         :showKnowledge="showKnowledge"
         @show-knowledge="handleShowKnowledge"
         @create-session="handleCreateSession"
@@ -36,7 +36,6 @@
         @rename-session="handleRenameSession"
         @toggle-pin="handleTogglePin"
         @toggle-sidebar="toggleSidebar"
-        @show-assets="handleShowAssets"
         @show-skill-center="handleShowSkillCenter"
         @show-scheduled-tasks="handleShowScheduledTasks"
         @show-settings="showSettingsPanel = true"
@@ -57,8 +56,6 @@
         </svg>
       </button>
       
-      <AssetsPanel v-if="showAssets" :visible="showAssets" @close="showAssets = false" />
-
       <SkillCenter
         v-if="showSkillCenter"
         :session-id="currentSessionId || ''"
@@ -90,7 +87,7 @@
       />
 
       <Chat
-        v-else-if="!showUserManagementPanel && !showAssets && !showSkillCenter && !showScheduledTasks"
+        v-else-if="!showUserManagementPanel && !showSkillCenter && !showScheduledTasks"
         :messages="messages"
         :sessionLoading="sessionLoading"
         :currentSessionId="currentSessionId"
@@ -127,10 +124,10 @@
         @edit="handleToolApproval('edit', $event)"
         @open-panel="openSkillCenterPanel"
         @open-knowledge="openKnowledgeWorkbench"
-        @select-expert="handleUseExpert"
+        @select-expert="handleSummonExpertInPlace"
       />
 
-      <div v-if="currentSessionId && !showKnowledge && !showUserManagementPanel && !showAssets && !showSkillCenter" class="workspace-area">
+      <div v-if="currentSessionId && !showKnowledge && !showUserManagementPanel && !showSkillCenter" class="workspace-area">
         <WorkspacePanel
           :username="userProfile.username"
           :currentSessionId="currentSessionId"
@@ -159,7 +156,6 @@
 <script>
 import SessionList from './features/chat/components/SessionList.vue'
 import Chat from './features/chat/components/Chat.vue'
-import AssetsPanel from './features/chat/components/AssetsPanel.vue'
 // 面板级懒加载：首屏不解析这些重型面板，首次打开时再拉对应 chunk
 const SkillCenter = () => import('./features/skills/components/SkillCenter.vue')
 const ScheduledTasksPanel = () => import('./features/tasks/components/ScheduledTasksPanel.vue')
@@ -175,10 +171,9 @@ import { getUserProfile, deleteFile } from './api/files.js'
 import chatSessionMixin, { parseMCPResult } from './features/chat/mixins/chatSession.js'
 import { chatStore } from './features/chat/store/chatStore.js'
 import { buildPageContext } from './utils/pageContext.js'
-import { getExpertLastSession } from './shared/utils/expertSession.js'
 import { applyApprovalRequests } from './utils/hitlApproval.js'
 import { logout as apiLogout, notifyLogout, getStoredToken, getStoredUsername, AUTH_EXPIRED_EVENT, authFetch, passwordlessLogin } from './api/auth.js'
-import { getModels as fetchModels } from './api/settings.js'
+import { getKnowledgeStatus, getModels as fetchModels } from './api/settings.js'
 import { isRestorableUserProfile } from './utils/userProfile.js'
 
 import { APP_TITLE, APP_WELCOME_TITLE, LOGIN_PAGE_ENABLED, PASSWORDLESS_LOGIN_ENABLED, SHARE_KEY_LOGIN_ID, SHARE_KEY_EMP_NO, SHARE_KEY_NAME, SHARE_KEY_BANK, DEFAULT_PASSWORDLESS_USERNAME, DEFAULT_PASSWORDLESS_USER_ID, readShareItem, ACTIVE_SESSION_KEY, NEW_SESSION_MARK, STREAM_STATE_KEY } from './features/chat/services/appConfig.js'
@@ -189,7 +184,6 @@ export default {
     AiSidebar,
     SidebarResizeHandle,
     KnowledgeWorkbench,
-    AssetsPanel,
     Chat,
     ScheduledTasksPanel,
     SessionList,
@@ -213,7 +207,7 @@ export default {
       presetQuestions: [],
       isSidebarCollapsed: false,
       isWorkspaceCollapsed: true,
-      showAssets: false,
+      knowledgeEnabled: false,
       showKnowledge: false,
       sidebarWidth: 280,
       showSkillCenter: false,
@@ -240,7 +234,6 @@ export default {
     // AI 侧边栏的页面上下文：描述用户唤起侧边栏时所在的页面/功能
     aiPageContext() {
       return buildPageContext({
-        showAssets: this.showAssets,
         showSkillCenter: this.showSkillCenter,
         showScheduledTasks: this.showScheduledTasks,
         showSettingsPanel: this.showSettingsPanel,
@@ -311,6 +304,7 @@ export default {
         if (!this.showWelcome && !this.authBlocked) {
           // 拉取可选模型列表（不阻塞会话加载）
           this.loadModels()
+          this.loadKnowledgeStatus()
           await this.loadSessions()
           await this.restoreInitialSession()
         }
@@ -330,6 +324,14 @@ export default {
         this.showWelcome = true
       } else {
         this.authBlocked = true
+      }
+    },
+    async loadKnowledgeStatus() {
+      try {
+        const data = await getKnowledgeStatus()
+        this.knowledgeEnabled = Boolean(data && data.enabled)
+      } catch (e) {
+        this.knowledgeEnabled = false
       }
     },
     async loadModels() {
@@ -408,12 +410,6 @@ export default {
     toggleSidebar() {
       this.isSidebarCollapsed = !this.isSidebarCollapsed
     },
-    handleShowAssets() {
-      this.showKnowledge = false
-      this.showAssets = !this.showAssets
-      this.showSkillCenter = false
-      this.showScheduledTasks = false
-    },
     openSkillCenterPanel(tab) {
       if (tab === 'knowledge') return this.openKnowledgeWorkbench()
       // 「+」菜单入口：打开面板并直接定位到专家/技能/连接器
@@ -421,19 +417,14 @@ export default {
       this.showSkillCenter = true
     },
     /**
-     * 「专家 Tab -> 使用」（及任何来源的专家选中）：把专家挂到当前会话。
+     * 「专家 Tab -> 召唤」（列表卡片 / 详情弹窗 / 示例问题）：**始终新开会话**。
      *
-     * 专家之间**不共享同一个会话**：会话记忆（memory.md）、历史消息、摘要与工作区
-     * 交付物都绑定在会话上，同一会话里换专家会让上一个专家留下的领域规则继续被注入
-     * （实测：先问利率债专家，再切 Java 专家问汇率，模型照着利率债的记忆"汇率拒答"
-     * 并照抄了历史里的专家名）。因此这里按「换专家 = 换会话」处理，但**不做成一味
-     * 新建**——先看该专家有没有聊过的会话，有就回去，这样对话记录与会话记忆都不丢。
+     * 2026-10-28 口径调整：从专家面板发起的召唤不再跳回该专家的历史会话，
+     * 一律给一个干净的新窗口（会话记忆、历史消息、工作区交付物都绑定在会话上，
+     * 沿用旧会话会让上次对话的上下文渗进本轮）。
+     * 例外：当前已是空白会话（没有任何消息）则就地复用，避免连点召唤堆出空会话。
      *
-     * 三种情况：
-     * 1. 当前是空会话（用户刚手动新建）→ 尊重这个新窗口，就地使用，不合并到旧会话；
-     * 2. 当前会话已有消息 → 若该专家有历史会话就跳过去，没有就新建一个干净会话；
-     * 3. 该专家的「最近会话」正是当前会话 → 只切换专家，不做任何跳转。
-     *
+     * 「+」号面板的召唤走 handleSummonExpertInPlace，不再进入本函数。
      * 与 frontend/src/App.vue 的同名函数同构，改动需同步两处。
      */
     async handleUseExpert(expert, prompt) {
@@ -446,37 +437,44 @@ export default {
       this.expertPrompt = typeof prompt === 'string' ? prompt : ''
       this.showSkillCenter = false
 
-      const expertId = picked.export_agent_id
-      const isBlankSession = this.messages.length === 0
-      const lastSessionId = getExpertLastSession(expertId)
-      // localStorage 里的会话可能已被删除：必须以会话列表为准，否则会跳到空会话
-      const lastSessionAlive =
-        !!lastSessionId && this.sessions.some(s => s.session_id === lastSessionId)
-
-      if (!isBlankSession && lastSessionId !== this.currentSessionId) {
-        if (lastSessionAlive) {
-          // 回到该专家上次的会话（切会话会清空专家选择，返回后统一恢复）
-          await this.handleSelectSession(lastSessionId)
-        } else {
-          // 该专家还没有（有效的）会话：开一个干净窗口，避免继承上一个专家的上下文
-          await this.handleCreateSession()
-        }
+      if (this.messages.length > 0) {
+        await this.handleCreateSession()
       }
 
-      // handleCreateSession / handleSelectSession 会清空专家选择（「切会话不沿用临时
-      // 选择」的既有口径），这里显式恢复成本轮用户刚选中的专家。
+      // handleCreateSession 会清空专家选择（「切会话不沿用临时选择」的既有口径），
+      // 这里显式恢复成本轮用户刚选中的专家。
+      this.selectedExpert = picked
+    },
+    /**
+     * 「+」号面板 -> 专家行的召唤：**留在当前会话**，只挂专家胶囊。
+     *
+     * 2026-10-28 口径调整：+ 面板召唤不再跳转/新建会话；唯一例外是当前会话
+     * 已经召唤了**另一位**专家——换专家 = 换会话（避免两位专家共享同一份
+     * 会话记忆互相污染），此时新建一个干净窗口再挂载。
+     * 与 frontend/src/App.vue 的同名函数同构，改动需同步两处。
+     */
+    async handleSummonExpertInPlace(expert) {
+      if (!expert || !expert.export_agent_id) return
+      const picked = {
+        export_agent_id: expert.export_agent_id,
+        export_name_cn: expert.export_name_cn,
+        export_version: expert.export_version,
+      }
+      if (this.selectedExpert && this.selectedExpert.export_agent_id !== picked.export_agent_id) {
+        await this.handleCreateSession()
+      }
       this.selectedExpert = picked
     },
     // AI 侧边栏「在主页面打开」：主对话区切到该会话
     async handleOpenSessionInMain(sessionId) {
       if (!sessionId) return
-      if (sessionId === this.currentSessionId && !this.showAssets && !this.showSkillCenter && !this.showScheduledTasks) return
+      if (sessionId === this.currentSessionId && !this.showSkillCenter && !this.showScheduledTasks) return
       await this.handleSelectSession(sessionId)
     },
     openKnowledgeWorkbench() {
+      if (!this.knowledgeEnabled) return
       // 「+」菜单知识库子面板入口：打开知识库工作台
       this.showKnowledge = true
-      this.showAssets = false
       this.showSkillCenter = false
       this.showScheduledTasks = false
       this.showSettingsPanel = false
@@ -485,18 +483,15 @@ export default {
     handleShowSkillCenter() {
       this.showKnowledge = false
       this.showSkillCenter = !this.showSkillCenter
-      this.showAssets = false
       this.showScheduledTasks = false
     },
     handleShowScheduledTasks() {
       this.showKnowledge = false
       this.showScheduledTasks = !this.showScheduledTasks
-      this.showAssets = false
       this.showSkillCenter = false
     },
     handleShowKnowledge() {
       this.showKnowledge = !this.showKnowledge
-      this.showAssets = false
       this.showSkillCenter = false
       this.showScheduledTasks = false
       this.showSettingsPanel = false
@@ -614,6 +609,7 @@ export default {
         console.warn('获取模型配置失败:', e)
       }
       this.loadModels()
+      this.loadKnowledgeStatus()
       await this.loadSessions()
       await this.restoreInitialSession()
     },
@@ -643,7 +639,6 @@ export default {
         organization_id: '',
         email: ''
       }
-      this.showAssets = false
       this.showSkillCenter = false
       this.selectedExpert = null
       this.hasBootstrapped = false
@@ -812,7 +807,6 @@ export default {
         // ChatInput 随之恢复草稿 + 技能标签）。知识库面板本就不会与专家面板同时开，
         // 这里一并复位，保证与 handleCreateSession 的「关面板」集合一致。
         this.showKnowledge = false
-        this.showAssets = false
         this.showSkillCenter = false
         this.showScheduledTasks = false
         this.showSettingsPanel = false
@@ -826,7 +820,6 @@ export default {
       this.showUserManagementPanel = false
       this.saveCurrentSessionState()
 
-      this.showAssets = false
       this.showSkillCenter = false
       this.showScheduledTasks = false
       this.showSettingsPanel = false
@@ -849,13 +842,12 @@ export default {
       // 保存当前会话状态
       this.saveCurrentSessionState()
 
-      this.showAssets = false
       this.showSkillCenter = false
       this.showScheduledTasks = false
       // 切换会话时不沿用上一个会话的专家选择（选择是当前工作台的临时状态，
       // 与 handleCreateSession、vue3 版 handleSelectSession 的口径一致）。
-      // 注意：handleUseExpert 会在调用本方法之后重新赋值 selectedExpert，
-      // 因此「召唤专家 → 切到其会话」的链路不受影响。
+      // 注意：handleUseExpert / handleSummonExpertInPlace 会在调用会话切换之后
+      // 重新赋值 selectedExpert，因此「召唤专家 → 新开会话」的链路不受影响。
       this.selectedExpert = null
       this.currentSessionId = sessionId
       // 切换后按当前会话是否正在流式输出决定输入框状态：
@@ -1451,7 +1443,7 @@ export default {
       // 事件按「所属会话」路由：后台会话写入其自身缓冲，不污染当前展示
       return { onChunk: (data) => this.runInSession(ctx.streamSessionId, ctx, () => onChunk(data)) }
     },
-    async handleSendMessage(message, files = [], signal, enableDeepThink = true, enableWebSearch = false, skills = [], expertEditId = '') {
+    async handleSendMessage(message, files = [], signal, enableDeepThink = true, enableWebSearch = false, skills = [], expertEditId = '', knowledgeBaseIds = []) {
       if (this.isCompacting) return
       const userMsgId = `user-${Date.now()}`
       const preStreamUsage = { ...this.sessionUsage }
@@ -1593,7 +1585,9 @@ export default {
           expertEditId,
           this.selectedExpert && this.selectedExpert.export_agent_id
             ? this.selectedExpert.export_agent_id
-            : ''
+            : '',
+          // 新对话首条消息携带的知识库范围：后端建会话后先落 scope 再检索
+          knowledgeBaseIds && knowledgeBaseIds.length ? { knowledgeBaseIds } : null
         )
 
         await this.refreshSessionFiles(null, 500)

@@ -34,7 +34,7 @@ for (const port of (process.argv[2] ? [Number(process.argv[2])] : [5178,5179])) 
     const body=req.postDataJSON(),current=sessions.find(s=>s.session_id===body.session_id);
     chatPosts++;
     const answer='压缩后的新回复 '+chatPosts;
-    current.messages.push({id:'sent-'+chatPosts,role:'user',content:body.message},{id:'reply-'+chatPosts,role:'assistant',content:answer});
+    current.messages.push({id:'sent-'+chatPosts,role:'user',content:body.message},{id:'reply-'+chatPosts,role:'assistant',content:answer,usage:{input_tokens:123,output_tokens:56,context_tokens:999,context_length:20000}});
     const events=[{type:'start',session_id:body.session_id},{type:'assistant_start'},{type:'content',content:answer,step:1},{type:'done',content:answer,usage:{input_tokens:123,output_tokens:56,context_tokens:999,context_length:20000}}];
     return route.fulfill({status:200,contentType:'text/event-stream',body:events.map(event=>'data: '+JSON.stringify(event)+'\n\n').join(''),headers:{'Access-Control-Allow-Origin':'*'}});
   }
@@ -117,7 +117,7 @@ for (const port of (process.argv[2] ? [Number(process.argv[2])] : [5178,5179])) 
  assert.equal(await page.locator('.chat-container:not(.is-sidebar) .context-ring-text').innerText(),'1%');
  assert.ok(await page.locator('.chat-messages .compaction-status').count()>0);
  // The saved record stays between turns, while a subsequent real usage wins.
- sessions[0].messages.push({id:'s1-next-user',role:'user',content:'继续'},{id:'s1-next-answer',role:'assistant',content:'下一轮回复'});
+ sessions[0].messages.push({id:'s1-next-user',role:'user',content:'继续'},{id:'s1-next-answer',role:'assistant',content:'下一轮回复',usage:{input_tokens:123,output_tokens:56,context_tokens:999,context_length:20000}});
  await page.reload();await page.waitForLoadState('networkidle');
  assert.equal(await page.locator('.chat-container:not(.is-sidebar) .context-ring-text').innerText(),'5%');
  assert.equal(await page.locator('.chat-container:not(.is-sidebar) .message-wrapper').nth(1).locator('.compaction-status').count(),sessions[0].messages[1].context_compactions.length);
@@ -132,6 +132,8 @@ for (const port of (process.argv[2] ? [Number(process.argv[2])] : [5178,5179])) 
    await page.waitForFunction(()=>document.querySelector('.chat-container:not(.is-sidebar) [aria-busy=true].compaction-status'));
    assert.equal(posts.length,beforePosts+1);release();
    const label=status==='skipped'?'当前无需压缩':'摘要服务暂时失败';
+   // 旧轮次可能已有同文案；等本次请求结束后再断言新估算，避免命中旧提示。
+   await page.waitForFunction(()=>!document.querySelector('.chat-container:not(.is-sidebar) [aria-busy=true].compaction-status'));
    const notice=page.locator('.chat-container:not(.is-sidebar) .compaction-status').filter({hasText:label}).last();
    await notice.waitFor();
    if(status==='skipped')assert.equal(await page.locator('.chat-container:not(.is-sidebar) .context-ring-text').innerText(),'2%');

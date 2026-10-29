@@ -21,11 +21,11 @@
         <span>新建会话</span>
       </button>
       
-      <button @click="$emit('showAssets')" class="action-btn assets">
+      <button v-if="knowledgeEnabled" @click="$emit('showKnowledge')" class="action-btn assets" :class="{ active: showKnowledge }">
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
         </svg>
-        <span>资产</span>
+        <span>知识库</span>
       </button>
 
       <button @click="$emit('showSkillCenter')" class="action-btn skill-center">
@@ -60,7 +60,7 @@
           v-for="session in group.sessions"
           :key="session.session_id"
           class="session-item"
-          :class="{ active: !showAssets && session.session_id === currentSessionId, streaming: streamingSessionIds.includes(session.session_id) }"
+          :class="{ active: !showKnowledge && session.session_id === currentSessionId, streaming: streamingSessionIds.includes(session.session_id) }"
           @click="$emit('selectSession', session.session_id)"
         >
           <div class="session-info">
@@ -74,6 +74,7 @@
               <span v-if="streamingSessionIds.includes(session.session_id)" class="streaming-badge" title="进行中">
                 <span class="streaming-dot"></span>
               </span>
+              <span v-if="session.pending_approval || pendingApprovalSessionIds.includes(session.session_id)" class="approval-flag" title="该会话存在待审批操作，需处理后才能继续">待审批</span>
             </div>
           </div>
           <div class="session-actions">
@@ -213,7 +214,7 @@ import { ref, nextTick, onMounted, computed } from 'vue'
 import { APP_TITLE } from '../../../config.js'
 import { ensureSkillDirectoryLoaded, skillFreeTitle } from '../../skills/store/skillDirectoryStore.js'
 
-const emit = defineEmits(['createSession', 'selectSession', 'deleteSession', 'renameSession', 'toggleSidebar', 'showAssets', 'showSkillCenter', 'showScheduledTasks', 'showSettings', 'showUserManagement', 'logout', 'togglePin'])
+const emit = defineEmits(['createSession', 'selectSession', 'deleteSession', 'renameSession', 'toggleSidebar', 'showKnowledge', 'showSkillCenter', 'showScheduledTasks', 'showSettings', 'showUserManagement', 'logout', 'togglePin'])
 
 const props = defineProps({
   sessions: {
@@ -225,6 +226,10 @@ const props = defineProps({
     default: null
   },
   streamingSessionIds: {
+    type: Array,
+    default: () => []
+  },
+  pendingApprovalSessionIds: {
     type: Array,
     default: () => []
   },
@@ -240,7 +245,11 @@ const props = defineProps({
     type: String,
     default: ''
   },
-  showAssets: {
+  knowledgeEnabled: {
+    type: Boolean,
+    default: false
+  },
+  showKnowledge: {
     type: Boolean,
     default: false
   }
@@ -574,6 +583,24 @@ function handleLogout() {
   border-radius: 50%;
   background: #22c55e;
   animation: streaming-pulse 1.2s infinite ease-in-out;
+}
+
+.approval-flag {
+  flex-shrink: 0;
+  margin-left: 2px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(245, 158, 11, 0.14);
+  color: #b45309;
+  font-size: 10px;
+  line-height: 1.5;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+html[data-theme="dark"] .approval-flag {
+  background: rgba(251, 191, 36, 0.16);
+  color: #fbbf24 !important;
 }
 
 @keyframes streaming-pulse {

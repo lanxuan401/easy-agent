@@ -1,5 +1,5 @@
 <template>
-  <div class="chat-container">
+  <div class="chat-container" :class="{ 'is-sidebar': isSidebar }">
     <div class="chat-main">
     <div class="chat-content" :class="composerMode === 'center' ? 'is-center' : 'is-bottom'">
       <!-- 顶部信息行：会话时间居中，操作区（任务规划 + 展开工作区）贴右。
@@ -21,7 +21,7 @@
                （那会让折叠会话列表时任务胶囊一起消失）。 -->
           <TodoListPanel :todos="todos" />
           <button
-            v-if="currentSessionId && !workspaceExpanded"
+            v-if="showWorkspaceBtn"
             class="expand-workspace-inline"
             @click="$emit('toggleWorkspace')"
             title="展开工作区"
@@ -35,7 +35,7 @@
       </div>
        <div class="chat-messages" ref="messagesRef" @scroll="handleScroll">
         <div v-if="messages.length === 0 && !sessionLoading" class="welcome-screen">
-          <h2>{{ welcomeTitle }}</h2>
+          <slot name="welcome"><h2>{{ welcomeTitle }}</h2></slot>
         </div>
         <!-- 切换会话拉取历史期间：显示骨架，避免先闪出空欢迎页 -->
         <div v-else-if="sessionLoading && messages.length === 0" class="session-loading-skeleton" aria-busy="true" aria-label="加载会话">
@@ -80,7 +80,7 @@
            点击卡片把该问题填进输入框（不直接发送），用户可改完自己发。 -->
       <div
         class="preset-area"
-        v-if="composerMode === 'center' && displayedPresetCards.length"
+        v-if="composerMode === 'center' && displayedPresetCards.length && !isSidebar"
       >
         <div class="preset-cards" :class="'count-' + displayedPresetCards.length">
           <div
@@ -109,9 +109,14 @@
         </div>
       </div>
 
+      <slot name="composer-prefix"></slot>
       <ChatInput
         ref="composerRef"
         class="composer"
+        :draft-key="draftKey"
+        :consume-pending-skill="!isSidebar"
+        :compact="isSidebar"
+        :show-manage-entry="showManageEntry"
         @send="onSend"
         :disabled="isStreaming || isCompacting"
         :compact-disabled-reason="compactDisabledReason"
@@ -123,13 +128,14 @@
         :iterationCount="iterationCount"
         :models="models"
         :selectedModel="selectedModel"
-        :showFooter="composerMode === 'bottom'"
+        :showFooter="composerMode === 'bottom' && !isSidebar"
         :activeExpert="activeExpert"
         :prefillText="expertPrompt"
         @update:selectedModel="(v) => emit('update:selectedModel', v)"
         @stop="handleStop"
         @createSession="handleCreateSession"
         @openPanel="(tab) => emit('openPanel', tab)"
+        @openKnowledge="emit('openKnowledge')"
         @clearExpert="emit('clearExpert')"
         @selectExpert="(expert) => emit('selectExpert', expert)"
         @prefillApplied="emit('expertPromptApplied')"
@@ -156,6 +162,7 @@ const props = defineProps(chatProps)
 const compactRecords = computed(() => mergeCompactionRecords(props.messages, props.compactionRecords))
 const displayUsage = computed(() => compactionUsage(props.messages, props.sessionUsage, compactRecords.value, props.selectedModel))
 watch([() => props.isCompacting, () => props.compactionRecords], () => scrollToBottom(true))
+const isSidebar = computed(() => props.variant === 'sidebar')
 
 watch([() => props.messages, () => props.messages.length, () => props.sessionLoading], ([newMessages, , loading]) => {
   // 空会话显示居中输入框；有消息时输入框贴底。
@@ -163,7 +170,7 @@ watch([() => props.messages, () => props.messages.length, () => props.sessionLoa
   // 额外追踪 messages.length：发送流程中 App 会先置空 messages（新引用，watch 触发
   // 回 'center'）再对同一数组 push 消息（引用不变，仅靠引用比较不会再次触发），
   // 导致点击预置问题卡片后卡片不消失、输入框不贴底。length 变化补上这次触发。
-  composerMode.value = (newMessages.length === 0 && !loading) ? 'center' : 'bottom'
+  composerMode.value = (newMessages.length === 0 && !loading && !isSidebar.value) ? 'center' : 'bottom'
 }, { immediate: true })
 
 // 预置问题卡片最多展示几张（一张卡片一条问题，多配的部分按顺序截断）
@@ -190,8 +197,8 @@ const displayedPresetCards = computed(() => {
 // 顶部信息行：会话时间（居中）+ 操作区（任务规划、展开工作区，贴右）。
 // 三者中任意一个需要展示时，这一行才占位 —— 首页（无会话）保持干净，
 // 否则会破坏 .chat-content.is-center 的垂直居中。
-const showSessionTime = computed(() => !!props.sessionCreatedAt && props.messages.length > 0)
-const showWorkspaceBtn = computed(() => !!props.currentSessionId && !props.workspaceExpanded)
+const showSessionTime = computed(() => !isSidebar.value && !!props.sessionCreatedAt && props.messages.length > 0)
+const showWorkspaceBtn = computed(() => !isSidebar.value && !!props.currentSessionId && !props.workspaceExpanded)
 const showTopbar = computed(() =>
   showSessionTime.value || props.todos.length > 0 || showWorkspaceBtn.value
 )
@@ -201,7 +208,7 @@ const topbarFloating = computed(
   () => !showSessionTime.value && props.todos.length === 0 && showWorkspaceBtn.value
 )
 
-const emit = defineEmits(['compact', 'sendMessage', 'stop', 'removeFile', 'createSession', 'approve', 'reject', 'edit', 'update:selectedModel', 'toggleWorkspace', 'clearExpert', 'selectExpert', 'expertPromptApplied', 'openPanel'])
+const emit = defineEmits(['compact', 'sendMessage', 'stop', 'removeFile', 'createSession', 'approve', 'reject', 'edit', 'update:selectedModel', 'toggleWorkspace', 'clearExpert', 'selectExpert', 'expertPromptApplied', 'openPanel', 'openKnowledge'])
 const messagesRef = ref(null)
 
 function formatSessionTime(isoStr) {
@@ -280,8 +287,8 @@ function goToNextUserMessage() {
   }
 }
 
-function handleSend(message, files, signal, enableDeepThink = true, enableWebSearch = false, skills = [], expertEditId = '') {
-  emit('sendMessage', message, files, signal, enableDeepThink, enableWebSearch, skills, expertEditId)
+function handleSend(message, files, signal, enableDeepThink = true, enableWebSearch = false, skills = [], expertEditId = '', knowledgeBaseIds = []) {
+  emit('sendMessage', message, files, signal, enableDeepThink, enableWebSearch, skills, expertEditId, knowledgeBaseIds)
 }
 
 function handleRemoveFile(file, messageIndex) {
@@ -345,10 +352,10 @@ function onPresetCardClick(cardIndex) {
 
 const composerRef = ref(null)
 
-function onSend(message, files, signal, enableDeepThink, enableWebSearch, skills, expertEditId = '') {
+function onSend(message, files, signal, enableDeepThink, enableWebSearch, skills, expertEditId = '', knowledgeBaseIds = []) {
   composerMode.value = 'bottom'
   isAtBottom.value = true
-  handleSend(message, files, signal, enableDeepThink, enableWebSearch, skills, expertEditId)
+  handleSend(message, files, signal, enableDeepThink, enableWebSearch, skills, expertEditId, knowledgeBaseIds)
 }
 
 // 是否贴底：用户位于滚动容器底部时为 true，向上滚动查看历史时为 false。
@@ -393,6 +400,11 @@ watch(() => props.scrollTrigger, () => {
   // 切换/加载会话时强制贴底
   isAtBottom.value = true
   scrollToBottom(true)
+})
+
+defineExpose({
+  focusComposer: () => composerRef.value?.focusInput(),
+  setComposerText: (text) => composerRef.value?.setDraft(text),
 })
 </script>
 
@@ -891,8 +903,6 @@ html[data-theme="dark"] .preset-deck:hover .preset-card {
 .scroll-btn.next {
   bottom: 170px;
 }
-
-
 
 /* 不再需要按面板宽度做避让（原 260px 硬编码在可拖拽后必然错位）：
    按钮已改为相对 .chat-container 定位，聊天区收窄时自动跟随。 */

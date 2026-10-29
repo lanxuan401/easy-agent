@@ -105,6 +105,16 @@
                     <polyline points="9 18 15 12 9 6"></polyline>
                   </svg>
                 </button>
+                <button v-if="knowledgeEnabled" type="button" class="plus-menu-item plus-menu-item-knowledge" @mouseenter="hoverPlusItem('knowledge', $event)" @click="openKnowledgeScope($event)">
+                  <svg class="plus-menu-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
+                    <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path>
+                  </svg>
+                  <span class="plus-menu-label">知识库</span>
+                  <svg class="plus-menu-arrow" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="9 18 15 12 9 6"></polyline>
+                  </svg>
+                </button>
                 <button type="button" class="plus-menu-item" @mouseenter="hoverPlusItem('experts', $event)" @click="openSubpanel('experts', $event)">
                   <svg class="plus-menu-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                     <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
@@ -139,46 +149,110 @@
               </div>
             </Teleport>
 
+            <!-- 知识库引用：加号菜单「知识库」悬停/点击展开，
+                 面板与技能子面板同款定位，锚到「知识库」菜单项右侧 -->
+            <KnowledgeScopeSelector
+              ref="knowledgeScope"
+              :session-id="sessionId || ''"
+              :disabled="disabled || isStreaming"
+              :pending-base-ids="pendingKnowledgeBaseIds"
+              hide-trigger
+              anchor-selector=".plus-menu-item-knowledge"
+              @change="handleKnowledgeScopeChange"
+              @manage="openKnowledgeManage"
+              @mouseenter="cancelPlusClose"
+              @mouseleave="schedulePlusClose"
+            />
+
             <!-- 「+」菜单二级浮动面板：主菜单常驻，子面板显示在触发项旁边。
                  skills → 技能列表（搜索/本地导入/管理入口，点击插入技能令牌）；
                  experts / connectors → 对应的用户条目列表。悬停或点击触发，互斥显示。 -->
             <Teleport to="body">
-              <SkillPicker
+              <!-- 技能：外框必须由 ChatInput 自己渲染（原生 div），与专家 / 连接器完全同构。
+                   早前把外框放在 SkillPicker 组件内部，位置高度靠 prop 传入，导致
+                   syncSubpanelBox 量不到真实高度、搜索后收缩不生效。 -->
+              <div
                 v-if="subpanelCategory === 'skills'"
-                :items="filteredSkillList"
-                :selected-dirs="selectedSkillDirs"
-                :loading="skillListLoading"
-                :error="skillListError"
-                :search="skillSearch"
-                :panel-style="skillSubmenuStyle"
-                @update:search="skillSearch = $event"
-                @select="onSkillSubItemClick"
-                @import="handleSkillImport"
-                @manage="handleMenuPanel('skills')"
-                @hover-in="cancelPlusClose"
-                @hover-out="schedulePlusClose"
-              />
+                ref="subpanelEl"
+                class="skill-submenu plus-subpanel"
+                :style="skillSubmenuStyle"
+                @click.stop
+                @mouseenter="onSubpanelEnter"
+                @mouseleave="onSubpanelLeave"
+                @focusin="onSubpanelFocusIn"
+                @focusout="onSubpanelFocusOut"
+              >
+                <SkillPicker
+                  :items="filteredSkillList"
+                  :selected-dirs="selectedSkillDirs"
+                  :loading="skillListLoading"
+                  :error="skillListError"
+                  :search="skillSearch"
+                  :title="plusListTitle"
+                  :count="plusListCount"
+                  @update:search="skillSearch = $event"
+                  @select="onSkillSubItemClick"
+                  @import="handleSkillImport"
+                  @manage="handleMenuPanel('skills')"
+                />
+              </div>
 
               <!-- 专家：上下两区（我的专家 / 公共专家），点行 = 召唤，再点 = 取消召唤 -->
               <div
                 v-else-if="subpanelCategory === 'experts'"
+                ref="subpanelEl"
                 class="skill-submenu plus-subpanel"
                 :style="skillSubmenuStyle"
                 @click.stop
-                @mouseenter="cancelPlusClose"
-                @mouseleave="schedulePlusClose"
+                @mouseenter="onSubpanelEnter"
+                @mouseleave="onSubpanelLeave"
+                @focusin="onSubpanelFocusIn"
+                @focusout="onSubpanelFocusOut"
               >
                 <div class="plus-subpanel-head">
                   <span class="plus-subpanel-title">{{ plusListTitle }}</span>
                   <span class="plus-menu-count">{{ plusListCount }}</span>
                 </div>
+                <!-- 搜索框常驻（与技能 / 连接器同一形态），按名称 / 描述 / 依赖技能名过滤 -->
+                <div
+                  v-if="hasPanelItems && !plusListLoading && !plusListError"
+                  class="skill-sub-search"
+                >
+                  <svg class="skill-sub-search-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="11" cy="11" r="8"></circle>
+                    <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                  </svg>
+                  <input
+                    v-model="subpanelKeyword"
+                    type="text"
+                    :placeholder="plusListSearchPlaceholder"
+                    :aria-label="plusListSearchPlaceholder"
+                    class="skill-sub-search-input"
+                    spellcheck="false"
+                    autocomplete="off"
+                    @keydown.esc.stop.prevent="subpanelKeyword = ''"
+                  />
+                  <button
+                    v-if="subpanelKeyword"
+                    type="button"
+                    class="skill-sub-search-clear"
+                    aria-label="清空搜索"
+                    @click="subpanelKeyword = ''"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                      <line x1="18" y1="6" x2="6" y2="18" />
+                      <line x1="6" y1="6" x2="18" y2="18" />
+                    </svg>
+                  </button>
+                </div>
                 <div v-if="plusListLoading" class="skill-sub-hint">加载中…</div>
                 <div v-else-if="plusListError" class="skill-sub-hint error">{{ plusListError }}</div>
-                <div v-else class="skill-sub-list plus-experts" @scroll="onExpertsScroll">
-                  <!-- 上区：我的专家（仅「可用」状态，与专家 Tab 的召唤约束一致） -->
-                  <div class="plus-experts-section">
+                <div v-else class="skill-sub-list plus-experts" :class="{ stacked: compact }" @scroll="onExpertsScroll">
+                  <!-- 上区：我的专家（仅「可用」状态，与专家 Tab 的召唤约束一致）。
+                       有搜索词时清空的区连标题一起收起，避免「标题 + 空白」的空壳。 -->
+                  <div v-if="showMineSection" class="plus-experts-section">
                     <span class="plus-experts-section-label">我的专家</span>
-                    <span v-if="myExpertsActive.length" class="plus-experts-section-count">{{ myExpertsActive.length }}</span>
+                    <span v-if="filteredMyExperts.length" class="plus-experts-section-count">{{ filteredMyExperts.length }}</span>
                   </div>
                   <button
                     v-for="item in visibleMyExperts"
@@ -191,12 +265,15 @@
                   >
                     <span class="plus-expert-avatar" :class="expertAvatarClass(item)">{{ expertAvatarChar(item) }}</span>
                     <span class="plus-expert-main">
-                      <span class="plus-expert-name">{{ item.export_name_cn }}</span>
+                      <span class="plus-expert-name-row">
+                        <span class="plus-expert-name">{{ item.export_name_cn }}</span>
+                        <span v-if="compact && isExpertSelected(item)" class="plus-expert-state">已选</span>
+                      </span>
                       <span class="plus-expert-desc">{{ expertDesc(item) }}</span>
                     </span>
-                    <span v-if="isExpertSelected(item)" class="plus-expert-state">已选</span>
+                    <span v-if="!compact && isExpertSelected(item)" class="plus-expert-state">已选</span>
                   </button>
-                  <div v-if="!myExpertsActive.length" class="plus-expert-empty">
+                  <div v-if="!subpanelKeyword && !filteredMyExperts.length" class="plus-expert-empty">
                     <span class="plus-expert-empty-text">您还没有创建自己的专家</span>
                     <button type="button" class="plus-expert-create" @click="handleMenuPanel('experts')">
                       「去创建」
@@ -204,21 +281,21 @@
                   </div>
                   <!-- 兜底：内容未超出容器高度时不会产生滚动条，用可点击的「还有 N 位」保证可达 -->
                   <button
-                    v-if="myExpertsActive.length > visibleMyExperts.length"
+                    v-if="filteredMyExperts.length > visibleMyExperts.length"
                     type="button"
                     class="plus-expert-more"
                     @click="loadMoreExperts"
                   >
-                    还有 {{ myExpertsActive.length - visibleMyExperts.length }} 位 · 点击加载
+                    还有 {{ filteredMyExperts.length - visibleMyExperts.length }} 位 · 点击加载
                   </button>
 
-                  <div class="plus-experts-divider"></div>
+                  <div v-if="showMineSection && showPublicSection" class="plus-experts-divider"></div>
 
                   <!-- 下区：公共（预置）专家 -->
-                  <div class="plus-experts-section">
+                  <div v-if="showPublicSection" class="plus-experts-section">
                     <span class="plus-experts-section-label">公共专家</span>
                     <span class="plus-experts-badge">预置</span>
-                    <span v-if="publicExperts.length" class="plus-experts-section-count">{{ publicExperts.length }}</span>
+                    <span v-if="filteredPublicExperts.length" class="plus-experts-section-count">{{ filteredPublicExperts.length }}</span>
                   </div>
                   <button
                     v-for="item in visiblePublicExperts"
@@ -231,22 +308,32 @@
                   >
                     <span class="plus-expert-avatar" :class="expertAvatarClass(item)">{{ expertAvatarChar(item) }}</span>
                     <span class="plus-expert-main">
-                      <span class="plus-expert-name">{{ item.export_name_cn }}</span>
+                      <span class="plus-expert-name-row">
+                        <span class="plus-expert-name">{{ item.export_name_cn }}</span>
+                        <span v-if="compact && isExpertSelected(item)" class="plus-expert-state">已选</span>
+                      </span>
                       <span class="plus-expert-desc">{{ expertDesc(item) }}</span>
                     </span>
-                    <span v-if="isExpertSelected(item)" class="plus-expert-state">已选</span>
+                    <span v-if="!compact && isExpertSelected(item)" class="plus-expert-state">已选</span>
                   </button>
-                  <div v-if="!publicExperts.length" class="skill-sub-hint">公共专家目录为空</div>
+                  <div v-if="!subpanelKeyword && !filteredPublicExperts.length" class="skill-sub-hint">公共专家目录为空</div>
+                  <!-- 搜索无命中：两区都空时给一句统一提示 -->
+                  <div
+                    v-if="subpanelKeyword && !filteredMyExperts.length && !filteredPublicExperts.length"
+                    class="skill-sub-hint"
+                  >
+                    未找到匹配的专家
+                  </div>
                   <button
-                    v-if="publicExperts.length > visiblePublicExperts.length"
+                    v-if="filteredPublicExperts.length > visiblePublicExperts.length"
                     type="button"
                     class="plus-expert-more"
                     @click="loadMoreExperts"
                   >
-                    还有 {{ publicExperts.length - visiblePublicExperts.length }} 位 · 点击加载
+                    还有 {{ filteredPublicExperts.length - visiblePublicExperts.length }} 位 · 点击加载
                   </button>
                 </div>
-                <div class="skill-sub-footer">
+                <div v-if="showManageEntry" class="skill-sub-footer">
                   <button type="button" class="skill-sub-footer-btn" @click="handleMenuPanel('experts')">
                     <span>在管理面板中打开 →</span>
                   </button>
@@ -257,44 +344,50 @@
                    行右侧是「会话级开关」：只影响本次会话的 Agent 工具集，不写 mcp.json。 -->
               <div
                 v-else-if="subpanelCategory === 'connectors'"
+                ref="subpanelEl"
                 class="skill-submenu plus-subpanel"
                 :style="skillSubmenuStyle"
                 @click.stop
-                @mouseenter="cancelPlusClose"
-                @mouseleave="schedulePlusClose"
+                @mouseenter="onSubpanelEnter"
+                @mouseleave="onSubpanelLeave"
+                @focusin="onSubpanelFocusIn"
+                @focusout="onSubpanelFocusOut"
               >
                 <div class="plus-subpanel-head">
                   <span class="plus-subpanel-title">{{ plusListTitle }}</span>
-                  <span class="plus-menu-count">{{ filteredPlusList.length }}</span>
-                  <button
-                    type="button"
-                    class="plus-subpanel-search-btn"
-                    :class="{ active: showConnectorSearch }"
-                    :aria-label="showConnectorSearch ? '收起搜索' : '搜索连接器'"
-                    :aria-expanded="showConnectorSearch ? 'true' : 'false'"
-                    @click="toggleConnectorSearch"
-                  >
-                    <svg v-if="!showConnectorSearch" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                      <circle cx="11" cy="11" r="8"></circle>
-                      <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
-                    </svg>
-                    <svg v-else xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
-                      <line x1="18" y1="6" x2="6" y2="18" />
-                      <line x1="6" y1="6" x2="18" y2="18" />
-                    </svg>
-                  </button>
+                  <span class="plus-menu-count">{{ plusListCount }}</span>
                 </div>
-                <div v-if="showConnectorSearch" class="skill-sub-search">
+                <!-- 搜索框常驻（专家 / 技能 / 连接器同一形态），输入即过滤 -->
+                <div
+                  v-if="hasPanelItems && !plusListLoading && !plusListError"
+                  class="skill-sub-search"
+                >
                   <svg class="skill-sub-search-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                     <circle cx="11" cy="11" r="8"></circle>
                     <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
                   </svg>
                   <input
-                    v-model="connectorKeyword"
+                    v-model="subpanelKeyword"
                     type="text"
-                    placeholder="搜索连接器"
+                    :placeholder="plusListSearchPlaceholder"
+                    :aria-label="plusListSearchPlaceholder"
                     class="skill-sub-search-input"
+                    spellcheck="false"
+                    autocomplete="off"
+                    @keydown.esc.stop.prevent="subpanelKeyword = ''"
                   />
+                  <button
+                    v-if="subpanelKeyword"
+                    type="button"
+                    class="skill-sub-search-clear"
+                    aria-label="清空搜索"
+                    @click="subpanelKeyword = ''"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                      <line x1="18" y1="6" x2="6" y2="18" />
+                      <line x1="6" y1="6" x2="18" y2="18" />
+                    </svg>
+                  </button>
                 </div>
                 <div class="skill-sub-list">
                   <div v-if="plusListLoading" class="skill-sub-hint">加载中…</div>
@@ -309,10 +402,8 @@
                   >
                     <span class="plus-list-icon" :class="{ initial: !item.icon }">{{ item.icon || item.initial }}</span>
                     <span class="plus-list-body">
-                      <span class="plus-list-name-row">
-                        <span class="plus-list-name">{{ item.name }}</span>
-                        <span v-if="item.tag" class="plus-list-tag" :class="item.tagType">{{ item.tag }}</span>
-                      </span>
+                      <span class="plus-list-name">{{ item.name }}</span>
+                      <span v-if="item.tag" class="plus-list-tag" :class="item.tagType">{{ item.tag }}</span>
                       <span class="plus-list-desc">{{ item.desc }}</span>
                     </span>
                     <button
@@ -346,7 +437,7 @@
                 >
                   {{ connectorNotice }}
                 </div>
-                <div class="skill-sub-footer">
+                <div v-if="showManageEntry" class="skill-sub-footer">
                   <button type="button" class="skill-sub-footer-btn" @click="handleMenuPanel(subpanelCategory)">
                     <span>在管理面板中打开 →</span>
                   </button>
@@ -398,7 +489,7 @@
                与专家 Tab 的「使用」联动，点击 × 退出专家模式回到通用 Agent。
                兼容性：不使用 flex gap / color-mix（IE 与旧版 Edge 不支持）。 -->
           <div
-            v-if="activeExpert"
+            v-if="activeExpert && !compact"
             class="expert-chip"
             :title="`当前专家：${activeExpert.export_name_cn}（点击 × 退出专家模式）`"
           >
@@ -421,7 +512,7 @@
         </div>
         
         <div class="right-actions">
-          <PromptEnhancementControls :state="enhancement" :can-enhance="canEnhance" @enhance="enhanceDraft" />
+          <PromptEnhancementControls :state="enhancement" :can-enhance="canEnhance && !preparingFiles" @enhance="!preparingFiles && enhanceDraft()" />
           <div 
             v-if="showTokenRing" 
             ref="ringRef"
@@ -485,7 +576,7 @@
             @click="send"
             class="action-btn send-btn"
             :class="{ active: canSend }"
-            :disabled="!canSend || disabled || enhancement.busy"
+            :disabled="!canSend || disabled || enhancement.busy || preparingFiles"
             v-tip="'发送（Enter）'"
           >
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -521,7 +612,7 @@
         <span class="skill-picker-hint">↑↓ 选择 · Enter 确认 · Esc 关闭</span>
       </div>
       <ul class="skill-picker-list" role="listbox" aria-label="指令与技能">
-        <li v-for="(option, index) in pickerOptions" :key="option.type + ':' + option.dir_name" role="presentation">
+        <li v-for="(option, index) in pickerRows" :key="option.type + ':' + option.dir_name" role="presentation">
           <div v-if="index === 0 || pickerOptions[index - 1].type !== option.type" class="skill-picker-group">
             {{ option.type === 'command' ? '指令' : '技能' }}
           </div>
@@ -532,15 +623,15 @@
             <span v-if="option.type === 'command'" aria-hidden="true">↥</span>
             <SkillIcon v-else :icon="option.icon" :category="iconCategoryFor(option.category_id)" size="xs" />
             <span class="skill-picker-body">
-              <span class="skill-picker-name">{{ option.name || option.dir_name }}</span>
-              <span class="skill-picker-desc">{{ option.type === 'command' && compactDisabledReason ? compactDisabledReason : (option.description || '暂无描述') }}</span>
+              <span class="skill-picker-name"><span v-for="(part, pi) in option.nameParts" :key="'n' + pi" :class="{ 'skill-picker-hit': part.hit }">{{ part.text }}</span></span>
+              <span class="skill-picker-desc"><span v-for="(part, pi) in option.descParts" :key="'d' + pi" :class="{ 'skill-picker-hit': part.hit }">{{ part.text }}</span></span>
             </span>
             <span class="skill-picker-slash">/{{ option.dir_name }}</span>
           </div>
         </li>
       </ul>
       <div v-if="skillPickerLoading" class="skill-picker-state">正在加载技能…</div>
-      <div v-else-if="filteredSkills.length === 0" class="skill-picker-state">
+      <div v-else-if="pickerOptions.length === 0" class="skill-picker-state">
         {{ skillOptions.length === 0 ? '还没有可用的技能，先到技能中心添加并启用' : '没有匹配的技能' }}
       </div>
       </div>
@@ -556,7 +647,7 @@
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { usePromptEnhancement } from '../composables/usePromptEnhancement.js'
 import { uploadFile, deleteFile } from '../../../api/files.js'
-import { getWebSearchStatus, getUploadLimits } from '../../../api/settings.js'
+import { getKnowledgeStatus, getWebSearchStatus, getUploadLimits } from '../../../api/settings.js'
 import { getUserSkills, importSkill } from '../../../api/skills.js'
 import { iconCategoryFor } from '../../../utils/skillCategories.js'
 
@@ -564,7 +655,7 @@ import { iconCategoryFor } from '../../../utils/skillCategories.js'
 // 补滚动条占位时要一起加上，否则镜像内容比 textarea 窄、换行位置对不上。
 const MIRROR_BLEED = 6
 import { useContextCommandPicker } from '../composables/useContextCommandPicker.js'
-import { buildMessageText, parseSlashQuery } from '../../../utils/skillSlash.js'
+import { buildMessageText, parseSlashQuery, splitByQuery } from '../../../utils/skillSlash.js'
 // 内联技能标签：标签文字 = textarea 文本里的子串，选中/删除/发送前的剥离都走这套纯逻辑
 import {
   buildSegments,
@@ -589,6 +680,7 @@ import PromptEnhancementControls from './PromptEnhancementControls.vue'
 import SkillPicker from './SkillPicker.vue'
 import UploadTray from './UploadTray.vue'
 import ModelPicker from './ModelPicker.vue'
+import KnowledgeScopeSelector from '../../knowledge/KnowledgeScopeSelector.vue'
 import FileIcon from '../../../shared/components/FileIcon.vue'
 import SkillIcon from '../../../shared/components/SkillIcon.vue'
 
@@ -647,14 +739,28 @@ const props = defineProps({
   prefillText: {
     type: String,
     default: ''
-  }
+  },
+  // 输入草稿的 sessionStorage key：主页面与 AI 侧边栏各存一份
+  draftKey: { type: String, default: 'easy_agent_input_draft' },
+  // 是否消费技能中心「创建技能」预置的待选技能（只应由主页面输入框消费）
+  consumePendingSkill: { type: Boolean, default: true },
+  // 「+」二级面板底部的「在管理面板中打开」入口
+  showManageEntry: { type: Boolean, default: true },
+  // 窄输入框（AI 侧边栏）：工具栏不放专家胶囊（会挤掉发送按钮，已选状态只在「+」→ 专家面板里体现），
+  // 专家行改为名称、描述分两行，选中后面板不收起
+  compact: { type: Boolean, default: false }
 })
 
-const emit = defineEmits(['compact', 'send', 'stop', 'createSession', 'update:selectedModel', 'typing', 'clearExpert', 'selectExpert', 'prefillApplied', 'openPanel'])
+const emit = defineEmits(['compact', 'send', 'stop', 'createSession', 'update:selectedModel', 'typing', 'clearExpert', 'selectExpert', 'prefillApplied', 'openPanel', 'openKnowledge'])
 
 const message = ref('')
 const textareaRef = ref(null)
 const uploadedFiles = ref([])
+// 新对话里勾选的知识库：只暂存在前端，首条消息发送时随请求提交，
+// 避免“选知识库”阶段提前创建空会话（已有会话仍走 knowledge-scope 接口保存）。
+const pendingKnowledgeBaseIds = ref([])
+// 发送前正在把“待发送”附件上传到刚创建/已有会话，防止重复点击发送
+const preparingFiles = ref(false)
 
 // 并行上传时共享的「等待会话创建」Promise（避免重复触发 createSession）
 let pendingSessionPromise = null
@@ -897,8 +1003,18 @@ const selectedSkillDirs = computed(() => {
  * 描述是一大段英文说明，几乎每个字母都能命中（如 m → manipulate / from / time），
  * 直接参与匹配会让检索看起来「完全没生效」，因此降级为兜底。
  */
-const { pickerOptions, selectPickerOption, filteredSkills } = useContextCommandPicker({ props, emit, skillQuery, skillOptions,
+const { pickerOptions, selectPickerOption } = useContextCommandPicker({ props, emit, skillQuery, skillOptions,
   skillPickerOpen, textareaRef, message, closeSkillPicker, selectSkill, replaceTextWithCaret })
+
+// 渲染与键盘导航共用 pickerOptions 的顺序，名称与描述保留搜索高亮。
+const pickerRows = computed(() =>
+  pickerOptions.value.map(option => ({
+    ...option,
+    nameParts: splitByQuery(option.name || option.dir_name, skillQuery.value),
+    descParts: splitByQuery(option.type === 'command' && props.compactDisabledReason
+      ? props.compactDisabledReason : (option.description || '暂无描述'), skillQuery.value),
+  }))
+)
 
 async function loadSkillOptions() {
   const now = Date.now()
@@ -1062,17 +1178,22 @@ function restorePendingSkill() {
   if (!raw) return
 
   try {
-    const skill = JSON.parse(raw)
-    if (!skill?.dir_name) return
-    rememberSkills([skill])
-    if (skill.insert_token === false) {
-      preselectedSkillDirs.value.add(skill.dir_name)
-      return
+    const parsed = JSON.parse(raw)
+    // 两种载荷：单个技能对象（技能中心）与 {skills: [...]}（专家面板：
+    // 新建带 expert-creator，编辑还会带上该专家已绑定的技能包）
+    const list = Array.isArray(parsed?.skills) ? parsed.skills : (parsed ? [parsed] : [])
+    for (const skill of list) {
+      if (!skill?.dir_name) continue
+      rememberSkills([skill])
+      if (skill.insert_token === false) {
+        preselectedSkillDirs.value.add(skill.dir_name)
+        continue
+      }
+      const ta = textareaRef.value
+      const base = ta?.value ?? message.value
+      if (skillSegments(base, tokenMap.value).some((seg) => seg.dirName === skill.dir_name)) continue
+      replaceTextWithCaret(insertSkillToken(base, base.length, tokenForSkill(skill)))
     }
-    const ta = textareaRef.value
-    const base = ta?.value ?? message.value
-    if (skillSegments(base, tokenMap.value).some((seg) => seg.dirName === skill.dir_name)) return
-    replaceTextWithCaret(insertSkillToken(base, base.length, tokenForSkill(skill)))
   } catch (e) {
     console.error('恢复待选技能失败:', e)
   }
@@ -1181,6 +1302,7 @@ function handleViewportChange() {
 // ========== 联网搜索 ==========
 // 开关状态仅本次页面会话有效（默认关闭）：开启后本轮消息携带 enable_web_search，
 // 后端注入 web_search 工具并追加联网搜索行为约束。
+const knowledgeEnabled = ref(false)
 const webSearchEnabled = ref(false)
 const webSearchStatus = ref({ enabled: false, configured: false })
 const webSearchUnavailable = computed(() => !webSearchStatus.value.configured)
@@ -1199,6 +1321,15 @@ function toggleWebSearch() {
   )
 }
 
+async function loadKnowledgeStatus() {
+  try {
+    const data = await getKnowledgeStatus()
+    knowledgeEnabled.value = Boolean(data && data.enabled)
+  } catch (e) {
+    knowledgeEnabled.value = false
+  }
+}
+
 async function loadWebSearchStatus() {
   try {
     const data = await getWebSearchStatus()
@@ -1212,9 +1343,6 @@ async function loadWebSearchStatus() {
     console.error('获取联网搜索状态失败:', e)
   }
 }
-
-// 输入草稿持久化：页面刷新后恢复用户尚未发送的输入内容（“输入框的状态不变”）
-const DRAFT_KEY = 'easy_agent_input_draft'
 
 // 待选技能：由技能中心「创建技能」等入口写入，本组件挂载时恢复成技能标签
 const PENDING_SKILL_KEY = 'easy_agent_pending_skill'
@@ -1255,15 +1383,17 @@ function onModelChange(name) {
 const fileInputRef = ref(null)
 const showPlusMenu = ref(false)
 const plusMenuRef = ref(null)
-// 菜单本身（Teleport 到 body）：默认展开连接器子面板时要用它找「连接器」菜单项定位
+// 菜单本身（Teleport 到 body）：悬停「知识库」时要用它找菜单项定位
 const plusMenuListRef = ref(null)
 const plusMenuStyle = ref({})
+const knowledgeScope = ref(null)
 
 function togglePlusMenu() {
   if (props.isStreaming || props.disabled) return
   if (showPlusMenu.value) {
     showPlusMenu.value = false
     subpanelCategory.value = null
+    knowledgeScope.value?.closePopover()
     cancelPlusClose()
     return
   }
@@ -1277,23 +1407,19 @@ function togglePlusMenu() {
       minWidth: '188px',
     }
   }
+  // 只弹出一级菜单：二级面板在悬停 / 点击对应菜单项时才展开
   subpanelCategory.value = null
   showPlusMenu.value = true
-  // 「+」= 展开连接器面板的触发器：菜单弹出后直接把连接器子面板展开在「连接器」
-  // 菜单项右侧（面板定位依赖该菜单项元素，要等 Teleport 渲染完成）。
-  nextTick(openConnectorsSubpanelFromMenu)
-}
-
-/** 「+」菜单打开时默认展开连接器子面板（定位参照菜单里的「连接器」项） */
-function openConnectorsSubpanelFromMenu() {
-  const anchor = plusMenuListRef.value?.querySelector('[data-category="connectors"]')
-  if (!anchor) return
-  openSubpanel('connectors', { currentTarget: anchor }, true)
 }
 
 function closePlusMenu(event) {
-  if (showPlusMenu.value && plusMenuRef.value && !plusMenuRef.value.contains(event.target)) {
+  // 点击知识库面板内部不算「菜单外」（面板不在菜单 DOM 内，但属于同一浮层交互）
+  const scopeRoot = knowledgeScope.value?.$el
+  const inScope = scopeRoot && scopeRoot.contains(event.target)
+  if (showPlusMenu.value && plusMenuRef.value && !plusMenuRef.value.contains(event.target) && !inScope) {
     showPlusMenu.value = false
+    subpanelCategory.value = null
+    knowledgeScope.value?.closePopover()
   }
   // 技能面板内部点击已被 @click.stop 拦截，能到这里说明点在面板外
   if (subpanelCategory.value && plusMenuRef.value && !plusMenuRef.value.contains(event.target)) {
@@ -1303,7 +1429,30 @@ function closePlusMenu(event) {
 
 function handleMenuAddFile() {
   showPlusMenu.value = false
+  subpanelCategory.value = null
+  knowledgeScope.value?.closePopover()
   fileInputRef.value?.click()
+}
+
+// 加号菜单「知识库」：点击保持主菜单常驻，面板贴菜单项右侧弹出
+function openKnowledgeScope(event) {
+  cancelPlusClose()
+  subpanelCategory.value = null
+  knowledgeScope.value?.openPopover(event?.currentTarget)
+}
+
+// 知识库子面板底部入口：关闭菜单并打开知识库工作台
+function openKnowledgeManage() {
+  showPlusMenu.value = false
+  subpanelCategory.value = null
+  knowledgeScope.value?.closePopover()
+  emit('openKnowledge')
+}
+
+// 知识库勾选变化：已有会话由选择器立即 PUT 落库；新对话只暂存，
+// 等首条消息发送时随 /agent/chat/stream 提交，由后端建会话后落库。
+function handleKnowledgeScopeChange(baseIds) {
+  pendingKnowledgeBaseIds.value = props.sessionId ? [] : [...baseIds]
 }
 
 // ========== 「+」二级列表：展示当前用户自己的条目（不跳转页面） ==========
@@ -1311,6 +1460,16 @@ function handleMenuAddFile() {
 //   技能   → GET /agent/skill-center/user-skills（workspace/{user}/skills，含已停用）
 //   连接器 → GET /agent/connectors（用户 mcp.json 中已安装的内置连接器 + 自定义服务）
 //   专家   → 我的专家（/agent/list，仅取可用状态） + 公共专家（/agent/public-list）
+// 「+」子面板尺寸与贴边间距：JS 定位与 CSS 宽度必须同源，否则放大后会溢出视口。
+// 单行布局（名称 + 描述同排）需要更宽的面板，400px 下描述只剩 130px 左右不够看。
+const SUBPANEL_WIDTH = 480
+// 子面板与主菜单之间的水平间隙；CSS 里的 ::before 热桥按「间隙 + 1px 重叠」覆盖这段空白
+const SUBPANEL_GAP = 6
+// 子面板高度上限。面板整体底边贴主菜单底边、向上生长，可视空间有多大就长多高，
+// 但封顶在这个值——否则技能多的用户会顶到屏幕顶端，观感像「整个页面被面板占住」。
+// 按行高约 44px 算，560px ≈ 列表能露出 10 行，比原来的 320px 一屏 5 行舒服很多。
+const SUBPANEL_MAX_HEIGHT = 560
+
 const subpanelCategory = ref(null) // 当前展开的二级面板：'skills' | 'experts' | 'connectors' | null
 const plusListCategory = ref('')
 const plusList = ref([])
@@ -1319,8 +1478,10 @@ const plusListError = ref('')
 // 专家快捷面板：上区我的专家 / 下区公共（预置）专家
 const myExperts = ref([])
 const publicExperts = ref([])
-// 两个区块默认各展示 3 位，列表滚动到底部再放出 3 位，避免面板超高
-const plusExpertsLimit = ref(3)
+// 两个区块默认各展示 6 位（单行布局后一屏放得下 6 行），滚动到底部再放出 3 位
+const plusExpertsLimit = ref(6)
+// 子面板搜索（专家 / 技能 / 连接器共用一个关键词，切换分类时清空）
+const subpanelKeyword = ref('')
 
 const PLUS_LIST_META = {
   experts: { title: '专家', empty: '暂无专家，敬请期待' },
@@ -1330,19 +1491,66 @@ const PLUS_LIST_META = {
 
 const plusListTitle = computed(() => PLUS_LIST_META[plusListCategory.value]?.title || '')
 const plusListEmptyText = computed(() => PLUS_LIST_META[plusListCategory.value]?.empty || '暂无内容')
+const plusListSearchPlaceholder = computed(() => {
+  const meta = { experts: '搜索专家', skills: '搜索技能', connectors: '搜索连接器' }
+  return meta[plusListCategory.value] || '搜索'
+})
 
 // 我的专家：仅保留「可用」（active）状态，与专家 Tab 的召唤约束一致
 const myExpertsActive = computed(() =>
   myExperts.value.filter((item) => item && item.agent_status === 'active')
 )
-const visibleMyExperts = computed(() => myExpertsActive.value.slice(0, plusExpertsLimit.value))
-const visiblePublicExperts = computed(() => publicExperts.value.slice(0, plusExpertsLimit.value))
 
-// 标题右侧计数：专家面板 = 我的（可用）+ 公共；其余面板 = 列表条数
-const plusListCount = computed(() =>
+/**
+ * 专家搜索：名称 / 描述 / 依赖技能名。
+ * 带上技能名是因为用户常按「这个专家用了什么技能」来找，而描述里未必出现该词。
+ */
+function filterExperts(list) {
+  const kw = subpanelKeyword.value.trim().toLowerCase()
+  if (!kw) return list || []
+  return (list || []).filter((item) => {
+    if (!item) return false
+    const name = String(item.export_name_cn || '').toLowerCase()
+    const desc = String(item.export_description || '').toLowerCase()
+    const skills = Array.isArray(item.export_skills_names)
+      ? item.export_skills_names.join(' ').toLowerCase()
+      : String(item.export_skills_names || '').toLowerCase()
+    return name.includes(kw) || desc.includes(kw) || skills.includes(kw)
+  })
+}
+
+const filteredMyExperts = computed(() => filterExperts(myExpertsActive.value))
+const filteredPublicExperts = computed(() => filterExperts(publicExperts.value))
+// 有搜索词时，清空的区连标题一起收起（避免「标题 + 空白」的空壳）
+const showMineSection = computed(() => !subpanelKeyword.value.trim() || filteredMyExperts.value.length > 0)
+const showPublicSection = computed(() => !subpanelKeyword.value.trim() || filteredPublicExperts.value.length > 0)
+
+// 搜索时全量展示（避免「搜到第 4 条却藏在『还有 N 位』后面」），否则按 limit 分页
+const visibleMyExperts = computed(() =>
+  subpanelKeyword.value.trim()
+    ? filteredMyExperts.value
+    : filteredMyExperts.value.slice(0, plusExpertsLimit.value)
+)
+const visiblePublicExperts = computed(() =>
+  subpanelKeyword.value.trim()
+    ? filteredPublicExperts.value
+    : filteredPublicExperts.value.slice(0, plusExpertsLimit.value)
+)
+
+// 标题右侧计数：过滤后的条数（专家 = 两区之和，技能 = 技能列表过滤后条数）
+const plusListCount = computed(() => {
+  if (plusListCategory.value === 'experts') {
+    return filteredMyExperts.value.length + filteredPublicExperts.value.length
+  }
+  if (plusListCategory.value === 'skills') return filteredSkillList.value.length
+  return filteredPlusList.value.length
+})
+
+// 空列表时不显示搜索框（免得对着空列表以为「搜不到」）
+const hasPanelItems = computed(() =>
   plusListCategory.value === 'experts'
-    ? myExpertsActive.value.length + publicExperts.value.length
-    : plusList.value.length
+    ? myExpertsActive.value.length + publicExperts.value.length > 0
+    : plusList.value.length > 0
 )
 
 function openPlusList(category) {
@@ -1353,11 +1561,11 @@ function openPlusList(category) {
   // 每次打开都重新拉取（接口很轻，且公共专家目录是服务端实时扫描的）
   myExperts.value = []
   publicExperts.value = []
-  plusExpertsLimit.value = 3
+  plusExpertsLimit.value = 6
+  // 三个面板共用一份搜索词：切分类时一律清空，避免把上一个面板的关键字带过来
+  subpanelKeyword.value = ''
   if (category === 'connectors') {
-    // 搜索框每次打开都收起；开关状态随连接器目录一起拉取（loadPlusList）
-    showConnectorSearch.value = false
-    connectorKeyword.value = ''
+    // 开关状态随连接器目录一起拉取（loadPlusList）
     clearConnectorNotice()
   }
   loadPlusList(category)
@@ -1378,15 +1586,59 @@ function cancelPlusClose() {
 
 function schedulePlusClose() {
   cancelPlusClose()
+  // 保护一：焦点在面板内（搜索框有光标）。面板会随搜索结果变矮，鼠标可能被
+  // 布局变化「抽」到面板外触发 mouseleave —— 此刻不能关，否则就是
+  // 「搜索一下就消失」。失焦后再判断（见 onSubpanelFocusOut）。
+  if (subpanelFocused.value) return
+  // 保护二：鼠标还停在面板上
+  if (subpanelHovered.value) return
+  // 350ms：给「从菜单项斜移进子面板」留足时间（250ms 在面板较远时不够用）。
+  // 真正的兜底是 .skill-submenu::before 的热桥，这里只是余量。
   plusHoverTimer = setTimeout(() => {
     plusHoverTimer = null
+    subpanelHovered.value = false
+    subpanelFocused.value = false
     showPlusMenu.value = false
     subpanelCategory.value = null
-  }, 250)
+    knowledgeScope.value?.closePopover()
+  }, 350)
+}
+
+/** 进入面板：取消关闭计时（面板会变矮，鼠标可能中途「悬空」，靠这个标志兜住） */
+function onSubpanelEnter() {
+  subpanelHovered.value = true
+  cancelPlusClose()
+}
+
+function onSubpanelLeave() {
+  subpanelHovered.value = false
+  schedulePlusClose()
+}
+
+/** 焦点进入面板（搜索框 / 行按钮）：锁定，不因鼠标移出而关闭 */
+function onSubpanelFocusIn() {
+  subpanelFocused.value = true
+  cancelPlusClose()
+}
+
+/** 焦点离开面板：只有在面板内部换焦点才算没走（focusout 早于新的 focusin） */
+function onSubpanelFocusOut(e) {
+  if (e && e.relatedTarget && e.currentTarget && e.currentTarget.contains(e.relatedTarget)) return
+  subpanelFocused.value = false
+  if (!subpanelHovered.value) schedulePlusClose()
 }
 
 function hoverPlusItem(category, event) {
   cancelPlusClose()
+  // 知识库与技能/专家一致：悬停即展开面板，无需点击
+  if (category === 'knowledge') {
+    subpanelCategory.value = null
+    const anchor = plusMenuListRef.value?.querySelector('.plus-menu-item-knowledge') || event?.currentTarget
+    knowledgeScope.value?.openPopover(anchor)
+    return
+  }
+  // 切到其他菜单项时收起知识库面板，避免两个浮层叠着
+  knowledgeScope.value?.closePopover()
   if (category === 'file') {
     // 无子面板的项：收起子面板，主菜单保持
     subpanelCategory.value = null
@@ -1459,6 +1711,8 @@ async function loadPlusList(category) {
     plusListError.value = e.message || '加载失败'
   } finally {
     plusListLoading.value = false
+    // 首屏数据到位后才是真实高度：重算一次（高度锁只增，所以这里只会把占位值矫正掉）
+    nextTick(syncSubpanelBox)
   }
 }
 
@@ -1492,8 +1746,10 @@ function toggleExpert(item) {
   } else {
     emit('selectExpert', item)
   }
+  if (props.compact) return
   showPlusMenu.value = false
   subpanelCategory.value = null
+  knowledgeScope.value?.closePopover()
   cancelPlusClose()
 }
 
@@ -1509,7 +1765,11 @@ function onExpertsScroll(e) {
 /** 每区多放出 3 条（滚动到底 / 点「还有 N 位」都会走到这里） */
 function loadMoreExperts() {
   const total = Math.max(myExpertsActive.value.length, publicExperts.value.length)
-  if (plusExpertsLimit.value < total) plusExpertsLimit.value += 3
+  if (plusExpertsLimit.value < total) {
+    plusExpertsLimit.value += 3
+    // 内容变多是唯一允许面板长高的场景（向上长），重算一次尺寸
+    nextTick(syncSubpanelBox)
+  }
 }
 
 // 列表底部入口：跳到「专家·技能·连接器」面板做完整管理（启用/停用、编辑等）
@@ -1529,6 +1789,21 @@ const skillList = ref([])
 const skillListLoading = ref(false)
 const skillListError = ref('')
 const skillImportInputRef = ref(null)
+// 子面板 DOM（技能/专家/连接器三者互斥，共用同一个 ref）：拿真实高度算尺寸，见 syncSubpanelBox。
+const subpanelEl = ref(null)
+// 一级菜单（.plus-menu）的视口坐标（顶边 / 底边）。
+// 子面板的底边活动范围就是 [plusMenuTop, plusMenuBottom]：打开时贴底边（左右两面板
+// 底部齐平），内容变少时底边往上收，最多收到与顶边齐平（面板整个落到菜单上方）。
+// 只在 openSubpanel 里写一次，之后 syncSubpanelBox 反复读。
+const plusMenuTop = ref(0)
+const plusMenuBottom = ref(0)
+// 本次打开以来量到过的「最满」高度，作为顶边基准（见 syncSubpanelBox）。
+const subpanelRefHeight = ref(0)
+// 关闭保护：鼠标是否停在面板上、焦点是否在面板内（搜索框）。
+// 面板会随搜索结果变矮，鼠标可能被「抽走」到面板外 —— 聚焦期间一律不自动关闭，
+// 等失焦且鼠标也不在面板上时才关（见 schedulePlusClose）。
+const subpanelHovered = ref(false)
+const subpanelFocused = ref(false)
 
 // 图标方块配色（参考稿中的彩色字母方块），按列表顺序循环取色
 const SKILL_ICON_COLORS = [
@@ -1552,6 +1827,25 @@ const filteredSkillList = computed(() => {
   return skillList.value.filter((s) => s.desc.toLowerCase().includes(kw))
 })
 
+/**
+ * 打开二级浮动面板（主菜单常驻），并给首帧一个占位尺寸。
+ *
+ * 真正的尺寸与位置由 syncSubpanelBox 负责。这里只做四件事：
+ * 算左右锚点、记住一级菜单的 top/bottom、写一个预估值占位（同帧就会被 sync 覆盖，
+ * 基本不会上屏）、复位「悬停 / 聚焦」两个关闭保护标志与高度基准。
+ *
+ * 垂直方向的规则（2026-10-24 定稿）：
+ * 1. **打开时两个面板底部齐平** —— 子面板底边 = 一级菜单底边。
+ * 2. 内容（被搜索）变少时**顶边不动、底边随之上收**，最多收到与一级菜单**顶边**齐平，
+ *    此时面板整个落在菜单上方，左下角正好咬住菜单右上角。
+ * 详见 syncSubpanelBox。
+ *
+ * 为什么不用 `bottom: 固定值`：底边钉住时内容变矮会让顶边（含搜索框）往下移，
+ * 鼠标原地掉出面板 → mouseleave → 面板关闭。现在允许变矮，靠「搜索框聚焦期间
+ * 不自动关闭」兜住（见 schedulePlusClose）。
+ *
+ * 也不能退回「按假设高度 420px 判断上下翻转」的老办法：这里用真实高度算。
+ */
 function openSubpanel(category, event, fromHover = false) {
   // hover 触发时同面板已打开则保持（避免鼠标在项与面板间移动导致闪烁）；
   // click 触发保持翻转语义（再次点击同一项关闭）
@@ -1561,20 +1855,101 @@ function openSubpanel(category, event, fromHover = false) {
     return
   }
   subpanelCategory.value = category
-  const rect = event.currentTarget.getBoundingClientRect()
-  // 面板贴在菜单项右侧，顶部与菜单项基本对齐；底部超出视口时上移
-  const estimatedHeight = 420
-  const top = Math.max(8, Math.min(rect.top - 8, window.innerHeight - estimatedHeight - 8))
-  const left = rect.right + 10 + 380 > window.innerWidth ? Math.max(8, rect.left - 390) : rect.right + 10
+  // 换面板时先清掉可能残留的关闭计时器（例如从搜索框失焦后立刻点了另一个菜单项）
+  cancelPlusClose()
+  subpanelFocused.value = false
+  subpanelHovered.value = false
+  subpanelRefHeight.value = 0
+  const anchor = event.currentTarget
+  const rect = anchor.getBoundingClientRect()
+  // 对齐基准是一级菜单容器（.plus-menu）：底边决定「齐平」，顶边是上收的极限
+  const menuEl = anchor.closest ? anchor.closest('.plus-menu') : null
+  const menuRect = menuEl ? menuEl.getBoundingClientRect() : null
+  plusMenuTop.value = menuRect ? menuRect.top : rect.top
+  plusMenuBottom.value = menuRect ? menuRect.bottom : rect.bottom
+  // 宽度与 CSS 同源，并受视口宽度约束（窄窗口下不许溢出）
+  const width = Math.min(SUBPANEL_WIDTH, window.innerWidth - 16)
+  const fitsRight = rect.right + SUBPANEL_GAP + width <= window.innerWidth - 8
+  const left = fitsRight
+    ? rect.right + SUBPANEL_GAP
+    : Math.max(8, rect.left - SUBPANEL_GAP - width)
+  // 占位：真实高度未知（列表异步加载）。先按「底边贴菜单底边、上限 = 菜单竖向空间」摆一下，
+  // sync 随后用真实内容高度校正。height 必须给 auto —— 像素值会把面板撑住。
+  const provisionalMax = Math.max(
+    120,
+    Math.min(SUBPANEL_MAX_HEIGHT, plusMenuBottom.value - Math.max(8, plusMenuTop.value))
+  )
   skillSubmenuStyle.value = {
     position: 'fixed',
-    top: `${top}px`,
     left: `${left}px`,
+    width: `${width}px`,
+    top: `${Math.max(8, plusMenuBottom.value - provisionalMax)}px`,
+    height: 'auto',
+    maxHeight: `${provisionalMax}px`,
   }
+  // 三个面板共用一套标题/占位/计数文案（PLUS_LIST_META），技能面板也要走到这里，
+  // 否则标题行与搜索占位会是空的（技能列表走 loadSkillSubList，不经 openPlusList）。
+  plusListCategory.value = category
+  // 三个面板共用一份搜索词：切分类时一律清空，避免把上一个面板的关键字带过来
+  subpanelKeyword.value = ''
   if (category === 'skills') {
+    skillSearch.value = ''
     loadSkillSubList()
   } else {
     openPlusList(category)
+  }
+  nextTick(syncSubpanelBox)
+}
+
+/**
+ * 计算并应用子面板的位置与高度（打开时、首屏数据到位后、搜索词变化、加载更多时）。
+ *
+ * 规则：
+ * 1. **底边范围**：[一级菜单顶边, 一级菜单底边]。打开 / 内容多 → 贴菜单底边
+ *    （于是左右两个面板底部齐平）；内容变少 → 底边往上收，收满就贴菜单顶边。
+ * 2. **顶边基准固定**：`top = 菜单底边 - 本次打开以来最满的高度`。内容变少时 top
+ *    不动，浮动的只有底边，所以搜索过滤时看到的是「下边框往上走」，而不是整块乱跳。
+ * 3. **高度 = 内容自然高度**（允许变矮），封顶 = min(SUBPANEL_MAX_HEIGHT, 菜单底边往上的空间)。
+ *    不搞「只增不减」，否则内容少了就是一个空白大面板。
+ * 4. 变矮会让鼠标「悬空」掉出面板，由 schedulePlusClose 的聚焦/悬停保护兜住。
+ */
+function syncSubpanelBox() {
+  const el = subpanelEl.value
+  const dom = el && el.$el ? el.$el : el
+  if (!dom) return
+  const viewportH = window.innerHeight
+  // 拿不到基准时退化到视口下半部，保证仍能算出一个合理位置
+  const menuTop = plusMenuTop.value || Math.round(viewportH * 0.6)
+  const menuBottom = plusMenuBottom.value || menuTop + 40
+  // 可用空间 = 视口顶到菜单底边（底边最低就贴到这里）
+  const cap = Math.max(120, Math.min(SUBPANEL_MAX_HEIGHT, menuBottom - 8))
+  // 量「内容自然高度」之前必须把上一轮写进去的 height / max-height 都放开，
+  // 否则量到的是被压扁的那份高度。
+  dom.style.height = 'auto'
+  dom.style.maxHeight = 'none'
+  const natural = dom.offsetHeight
+  // 拿不到高度（面板还没布局）就别动样式，否则会被压成 1px
+  if (!natural) return
+  const height = Math.min(natural, cap)
+  // 本次打开以来量到过的最大内容高度 = 顶边基准（只增不减）：
+  // 搜索过滤后顶边不许跟着往下滑，只能底边上收。
+  if (height > subpanelRefHeight.value) subpanelRefHeight.value = height
+  const refHeight = subpanelRefHeight.value || height
+  // 基准顶边：最满时底边正好贴菜单底边 → 打开时左右两面板底部齐平
+  let top = menuBottom - refHeight
+  // 上收极限：底边最多收到与「菜单顶边」齐平（判据用底边，不能用 top）
+  if (top + height < menuTop) top = menuTop - height
+  // 兜底：不许越过菜单底边、不许钻出视口顶
+  top = Math.max(8, Math.min(top, menuBottom - height))
+  // ★ 关键：不写死 height 像素，只给 max-height。面板高度交给内容决定，
+  // 搜索后条数变少 → 面板立刻变矮、下边框上收（2026-10-24）；
+  // 即使 offsetHeight 量偏，也只影响 top 与上限，不会把面板撑住。
+  dom.style.maxHeight = `${refHeight}px`
+  skillSubmenuStyle.value = {
+    ...skillSubmenuStyle.value,
+    top: `${top}px`,
+    height: 'auto',
+    maxHeight: `${refHeight}px`,
   }
 }
 
@@ -1603,6 +1978,8 @@ async function loadSkillSubList() {
     skillListError.value = e.message || '加载技能失败'
   } finally {
     skillListLoading.value = false
+    // 首屏数据到位后才是真实高度：重算一次（高度锁只增，所以这里只会把占位值矫正掉）
+    nextTick(syncSubpanelBox)
   }
 }
 
@@ -1646,25 +2023,28 @@ const connectorNoticeType = ref('success')
 let connectorNoticeTimer = null
 // 连接器状态变更事件的取消订阅函数（onMounted 注册、onUnmounted 解绑）
 let offConnectorsChanged = null
-// 面板内的搜索：按钮展开输入框，按名称/描述过滤
-const showConnectorSearch = ref(false)
-const connectorKeyword = ref('')
+// 面板内的搜索词已统一为 subpanelKeyword（见上方「+」二级列表区域）
 
 /** 连接器行在会话开关里的标识（目录条目用 id，自定义服务用 server 名） */
 function connectorKeyOf(item) {
   return (item && item.connectorId) || ''
 }
 
-/** 【连接器】面板的搜索结果（其余分类的面板照旧用 plusList） */
+/**
+ * 【技能 / 连接器】面板的搜索结果。
+ * 名称（含技能目录名）优先命中；描述是一大段说明，几乎每个词都能命中，
+ * 因此只在名称完全没命中时才回退到描述（与「/」检索同一取舍）。
+ */
 const filteredPlusList = computed(() => {
-  if (plusListCategory.value !== 'connectors') return plusList.value
-  const kw = connectorKeyword.value.trim().toLowerCase()
+  const kw = subpanelKeyword.value.trim().toLowerCase()
   if (!kw) return plusList.value
-  return plusList.value.filter((item) => {
+  const byName = plusList.value.filter((item) => {
     const name = String(item.name || '').toLowerCase()
-    const desc = String(item.desc || '').toLowerCase()
-    return name.includes(kw) || desc.includes(kw)
+    const dir = String(item.dir_name || '').toLowerCase()
+    return name.includes(kw) || dir.includes(kw)
   })
+  if (byName.length > 0) return byName
+  return plusList.value.filter((item) => String(item.desc || '').toLowerCase().includes(kw))
 })
 
 /**
@@ -1727,12 +2107,6 @@ function clearConnectorNotice() {
   if (connectorNoticeTimer) clearTimeout(connectorNoticeTimer)
   connectorNoticeTimer = null
   connectorNotice.value = ''
-}
-
-/** 展开/收起面板内的搜索框（收起时清掉关键字，避免下次打开还停在过滤态） */
-function toggleConnectorSearch() {
-  showConnectorSearch.value = !showConnectorSearch.value
-  if (!showConnectorSearch.value) connectorKeyword.value = ''
 }
 
 /** 按最新状态刷新某个连接器行的开关与 tag（tag 停用时统一显示「已停用」） */
@@ -1800,6 +2174,8 @@ let selfCreatedSession = false
 
 watch(() => props.sessionId, (newVal, oldVal) => {
   if (newVal === oldVal) return
+  // 会话已切换/已创建：下一次发送需要按新的 sessionId 重新判断
+  pendingSessionPromise = null
   // 本组件自己发起的建会话（上传文件 / 切换连接器开关）仍属「输入阶段的连续操作」，
   // 不要收起正在用的「+」面板（否则点一下开关面板就消失，看不出刚做了什么）。
   const ownCreate = selfCreatedSession
@@ -1808,9 +2184,10 @@ watch(() => props.sessionId, (newVal, oldVal) => {
   // 技能标签是文本的一部分：切会话时把标签从草稿里剥掉（等价于旧的「令牌复位」），
   // 避免标签跟着草稿残留到历史会话的输入框里；本组件自己发起的建会话不算切换，保留标签。
   if (!ownCreate) message.value = stripSkillTokens(message.value, tokenMap.value)
+  // 切到其他会话/回到新对话：新对话暂存的知识选择不再适用
+  if (!newVal || (oldVal && newVal !== oldVal)) pendingKnowledgeBaseIds.value = []
   // 注：连接器开关不随会话走（它反映连接器自身的启用状态，与会话无关）
-  connectorKeyword.value = ''
-  showConnectorSearch.value = false
+  subpanelKeyword.value = ''
 })
 
 // ========== 从本地添加技能（.zip 导入） ==========
@@ -1871,6 +2248,13 @@ watch(shouldCountLive, (on) => {
   if (on) startLiveDuration()
   else stopLiveDuration()
 })
+
+// 搜索词一变，列表条数就变，面板高度必须跟着重算（底边会随条数上下浮动，
+// 变多/变少都要重算；是否关闭由 schedulePlusClose 的「聚焦保护」负责）。
+watch(subpanelKeyword, () => nextTick(syncSubpanelBox))
+// 技能面板用的是自己的 skillSearch（不是 subpanelKeyword）：漏了这一条，在技能面板里
+// 搜索时列表变了但面板高度不重算 —— 表现就是「搜索后高度不跟着收，只有专家面板对」。
+watch(skillSearch, () => nextTick(syncSubpanelBox))
 
 const formattedDuration = computed(() => {
   const total = Math.floor(displayDuration.value)
@@ -1942,28 +2326,35 @@ function formatTokens(n) {
  * 确保会话存在并返回 sessionId（并行上传共享同一个创建 Promise，
  * 避免一次选择多个文件时重复触发 createSession）。
  *
- * 本组件自己发起的建会话会让 sessionId 变化：watcher 据此不收起「+」面板、
- * 也不剥离输入框里的技能标签（此刻仍是「用户输入阶段」，文件刚选、技能刚选）。
- * 连接器开关也走这里：新建态下切换开关时先建会话，再按 session_id 提交给后端。
+ * 仅在“发送”阶段调用：新对话选附件时不再提前建会话，附件先以待上传状态
+ * 留在前端，用户点发送后才创建会话并上传。
  */
 function ensureSessionId() {
   if (props.sessionId) return Promise.resolve(props.sessionId)
   if (!pendingSessionPromise) {
-    pendingSessionPromise = new Promise((resolve) => {
-      // 创建一个临时的监听器来等待会话创建完成
-      const unwatch = watch(
+    pendingSessionPromise = new Promise((resolve, reject) => {
+      let unwatch = null
+      // 会话创建失败（接口异常等）时避免上传链路永久挂起
+      const timer = setTimeout(() => {
+        if (unwatch) unwatch()
+        reject(new Error('会话创建超时，请重试'))
+      }, 15000)
+      unwatch = watch(
         () => props.sessionId,
         (newSessionId) => {
-          if (newSessionId) {
-            unwatch()
-            resolve(newSessionId)
-          }
+          if (!newSessionId) return
+          clearTimeout(timer)
+          unwatch()
+          resolve(newSessionId)
         }
       )
       // 触发会话创建（标记为「自己发起」，watcher 据此不收起「+」面板）
       selfCreatedSession = true
       emit('createSession')
-    }).then((sessionId) => sessionId)
+    }).catch((error) => {
+      pendingSessionPromise = null
+      throw error
+    })
   }
   return pendingSessionPromise
 }
@@ -2051,13 +2442,15 @@ function retryUpload(index) {
     }
   }
 
-  item.uploadStatus = 'uploading'
+  // 重试同样遵循“发送时才上传”：已有会话可立即重传；新对话回到待发送状态，
+  // 等用户点发送时再建会话并上传。
+  item.uploadStatus = props.sessionId ? 'uploading' : 'pending'
   item.uploadProgress = 0
   item.errorMessage = ''
   item.retryable = false
   item.cancelled = false
   uploadedFiles.value = [...uploadedFiles.value]
-  uploadOneFile(item)
+  if (props.sessionId) uploadOneFile(item)
 }
 
 async function handleFileSelect(event) {
@@ -2080,13 +2473,16 @@ async function handleFileSelect(event) {
   }
 
   // 并行上传：每个文件独立开始、独立进度，互不排队
+  // 新对话不立即上传：先以待发送状态留在前端，发送时创建会话再上传；
+  // 已有会话按原有体验立即上传。
+  const uploadNow = Boolean(props.sessionId)
   for (const file of result.accepted) {
     // 创建文件项
     const fileItem = {
       file: file,
       filename: file.name,
       size: file.size,
-      uploadStatus: 'uploading',
+      uploadStatus: uploadNow ? 'uploading' : 'pending',
       uploadProgress: 0,
       cancelled: false,
       xhrHolder: null,
@@ -2100,7 +2496,7 @@ async function handleFileSelect(event) {
     // 强制触发初始渲染
     uploadedFiles.value = [...uploadedFiles.value]
 
-    uploadOneFile(fileItem)
+    if (uploadNow) uploadOneFile(fileItem)
   }
 }
 
@@ -2134,68 +2530,102 @@ async function removeFile(index) {
   uploadedFiles.value = [...uploadedFiles.value]
 }
 
-async function send() {
-  if (!canSend.value || props.disabled || enhancement.value.busy) return
-  
-  // 等待所有文件上传完成
-  const uploadingFiles = uploadedFiles.value.filter(f => f.uploadStatus === 'uploading')
-  if (uploadingFiles.length > 0) {
-    // 显示上传中提示
-    console.log('文件正在上传中，请稍候...')
-    // 可以添加一个loading状态或提示信息
-    return
+/** 发送前把“待发送”附件上传到会话（新对话此时才会创建会话） */
+async function preparePendingFiles() {
+  const pending = uploadedFiles.value.filter(f => f.uploadStatus === 'pending')
+  if (!pending.length) return
+  for (const item of pending) {
+    if (item.cancelled) continue
+    item.uploadStatus = 'uploading'
+    item.uploadProgress = 0
+    item.errorMessage = ''
+    item.retryable = false
   }
-  
-  // 只发送上传成功的文件：失败文件（无 id/file_path）不随消息发出、不在气泡中展示
-  const failedFiles = uploadedFiles.value.filter(f => f.uploadStatus === 'error')
-  if (failedFiles.length > 0) {
-    console.warn(`[发送消息] ${failedFiles.length} 个文件上传失败，已从本次发送中剔除:`,
-      failedFiles.map(f => f.filename).join(', '))
-  }
-  const filesToSend = uploadedFiles.value
-    .filter(f => f.uploadStatus === 'completed')
-    .map(f => ({
-      id: f.id,
-      filename: f.filename,
-      size: f.size,
-      file: f.file,
-      file_path: f.filePath || null,
-      type: f.file?.type || f.fileType || ''
-    }))
-
-  // 详细日志：记录发送操作、文件上传
-  const ts = new Date().toISOString()
-  console.log(`[${ts}] [发送消息] 内容: "${message.value.substring(0, 100)}" | 文件数: ${filesToSend.length}`)
-  if (filesToSend.length > 0) {
-    console.log(`[${ts}] [文件上传] ${filesToSend.map(f => `${f.filename}(${f.size}B)`).join(', ')}`)
-  }
-
-  // 已选技能以 skills（技能目录名）参数单独交给后端；输入框里的内联标签只是 UI，
-  // 正文发送前会把标签整段剥掉（否则气泡/标题/历史里会露出 `/技能名` 这类暗号）。
-  // 连接器不随消息提交：本会话启用哪些连接器由「+」面板的连接器开关单独设置。
-  const turnSkills = selectedSkillDirs.value
-  // 待修改专家 ID（专家面板「编辑」带入，不展示给用户）：随请求结构化字段上行，
-  // 后端校验归属后绑定为 save_expert 的修改目标
-  const expertEditId = pendingExpertEditId.value
-  emit(
-    'send',
-    buildPayload(),
-    filesToSend,
-    null,
-    true,
-    webSearchEnabled.value,
-    turnSkills,
-    expertEditId
+  uploadedFiles.value = [...uploadedFiles.value]
+  await Promise.all(
+    pending.filter(item => !item.cancelled).map(item => uploadOneFile(item))
   )
+}
 
-  message.value = ''
-  uploadedFiles.value = []
-  // 预选技能与待修改专家已随本条消息提交，清掉避免影响下一条
-  preselectedSkillDirs.value = new Set()
-  pendingExpertEditId.value = ''
-  dismissUploadNotice()
-  closeSkillPicker()
-  nextTick(() => autoResize())
+async function send() {
+  if (!canSend.value || props.disabled || enhancement.value.busy || preparingFiles.value) return
+  preparingFiles.value = true
+  try {
+    // 新对话的知识选择只存在本地：先取快照，再上传附件（上传会先创建会话）
+    const knowledgeBaseIds = props.sessionId ? [] : [...pendingKnowledgeBaseIds.value]
+
+    // 新对话的附件此前未上传，发送时才落盘
+    await preparePendingFiles()
+
+    // 等待所有文件上传完成
+    const uploadingFiles = uploadedFiles.value.filter(f => f.uploadStatus === 'uploading')
+    if (uploadingFiles.length > 0) {
+      console.log('文件正在上传中，请稍候...')
+      return
+    }
+
+    // 只发送上传成功的文件：失败文件（无 id/file_path）不随消息发出、不在气泡中展示
+    const failedFiles = uploadedFiles.value.filter(f => f.uploadStatus === 'error')
+    if (failedFiles.length > 0) {
+      console.warn(`[发送消息] ${failedFiles.length} 个文件上传失败，已从本次发送中剔除:`,
+        failedFiles.map(f => f.filename).join(', '))
+    }
+    const filesToSend = uploadedFiles.value
+      .filter(f => f.uploadStatus === 'completed')
+      .map(f => ({
+        id: f.id,
+        filename: f.filename,
+        size: f.size,
+        file: f.file,
+        file_path: f.filePath || null,
+        type: f.file?.type || f.fileType || ''
+      }))
+
+    const payload = buildPayload()
+    if (!payload && !filesToSend.length && !selectedSkillDirs.value.length) {
+      // 附件全部失败且没有正文/技能：保留文件与错误提示，不发空请求
+      return
+    }
+
+    // 详细日志：记录发送操作、文件上传
+    const ts = new Date().toISOString()
+    console.log(`[${ts}] [发送消息] 内容: "${message.value.substring(0, 100)}" | 文件数: ${filesToSend.length}`)
+    if (filesToSend.length > 0) {
+      console.log(`[${ts}] [文件上传] ${filesToSend.map(f => `${f.filename}(${f.size}B)`).join(', ')}`)
+    }
+
+    // 已选技能以 skills（技能目录名）参数单独交给后端；输入框里的内联标签只是 UI，
+    // 正文发送前会把标签整段剥掉（否则气泡/标题/历史里会露出 `/技能名` 这类暗号）。
+    // 连接器不随消息提交：本会话启用哪些连接器由「+」面板的连接器开关单独设置。
+    const turnSkills = selectedSkillDirs.value
+    // 待修改专家 ID（专家面板「编辑」带入，不展示给用户）：随请求结构化字段上行，
+    // 后端校验归属后绑定为 save_expert 的修改目标
+    const expertEditId = pendingExpertEditId.value
+    emit(
+      'send',
+      payload,
+      filesToSend,
+      null,
+      true,
+      webSearchEnabled.value,
+      turnSkills,
+      expertEditId,
+      knowledgeBaseIds
+    )
+
+    message.value = ''
+    uploadedFiles.value = []
+    // 新对话选择已随消息提交；已有会话改选由选择器单独落库，这里清掉本地暂存
+    if (props.sessionId) pendingKnowledgeBaseIds.value = []
+    // 预选技能与待修改专家已随本条消息提交，清掉避免影响下一条
+    preselectedSkillDirs.value = new Set()
+    pendingExpertEditId.value = ''
+    dismissUploadNotice()
+    closeSkillPicker()
+    nextTick(() => autoResize())
+  } finally {
+    preparingFiles.value = false
+  }
 }
 
 /**
@@ -2242,7 +2672,7 @@ function onInput(event) {
 
 watch(message, (val) => {
   try {
-    sessionStorage.setItem(DRAFT_KEY, val)
+    sessionStorage.setItem(props.draftKey, val)
   } catch (e) {
     // 隐私模式等场景下 sessionStorage 可能不可用，忽略即可
   }
@@ -2265,7 +2695,7 @@ const { enhancement, canEnhance, enhanceDraft, promptEnhancer } = usePromptEnhan
 onMounted(() => {
   // 恢复刷新前的输入草稿
   try {
-    const draft = sessionStorage.getItem(DRAFT_KEY)
+    const draft = sessionStorage.getItem(props.draftKey)
     if (draft) {
       message.value = draft
       nextTick(() => autoResize())
@@ -2286,7 +2716,7 @@ onMounted(() => {
     .catch(() => { /* 列表拉取失败时标签按普通文本显示，不影响输入 */ })
 
   // 恢复待选技能（技能中心「创建技能」等入口预置），读取后即清除
-  restorePendingSkill()
+  if (props.consumePendingSkill) restorePendingSkill()
 
   // 消费待修改专家（专家面板「编辑」预置）：ID 存组件状态、不进正文，发送时上行
   try {
@@ -2302,6 +2732,7 @@ onMounted(() => {
   window.addEventListener('resize', handleViewportChange)
   document.addEventListener('click', closePlusMenu)
   loadWebSearchStatus()
+  loadKnowledgeStatus()
   // 「专家·技能·连接器」面板里改了开关 → 本面板同步（两个面板不在同一组件树分支，走事件广播）
   offConnectorsChanged = onConnectorsChanged(onConnectorsChangedHandler)
   loadUploadLimits()
@@ -2337,7 +2768,24 @@ function triggerSend() {
   send()
 }
 
-defineExpose({ setMessage, getMessage, triggerSend })
+// 供父组件调用：聚焦输入框并把光标移到末尾（如侧边栏打开时）
+function focusInput() {
+  nextTick(() => {
+    const ta = textareaRef.value
+    if (!ta || ta.disabled) return
+    ta.focus()
+    ta.setSelectionRange(ta.value.length, ta.value.length)
+  })
+}
+
+// 供父组件调用：替换输入内容（如侧边栏的快捷提问、划词提问）
+function setDraft(text) {
+  message.value = text || ''
+  nextTick(() => autoResize())
+  focusInput()
+}
+
+defineExpose({ setMessage, getMessage, triggerSend, focusInput, setDraft })
 </script>
 
 <style scoped>
@@ -2708,6 +3156,16 @@ html[data-theme="dark"] .connector-switch.on {
   gap: 2px;
 }
 
+/* 检索命中的片段：只染色不加底，选中行本身有淡色背景，叠加底色会糊成一片 */
+.skill-picker-hit {
+  color: var(--accent-color);
+}
+
+/* 名称是这一行的主标识，命中再加粗一档，扫视时比描述更先被看到 */
+.skill-picker-name .skill-picker-hit {
+  font-weight: 600;
+}
+
 .skill-picker-name {
   font-size: 13px;
   color: var(--text-primary);
@@ -2984,6 +3442,9 @@ html[data-theme="dark"] .context-ring-wrapper {
   gap: 10px;
 }
 
+.plus-menu-wrapper {
+  display: inline-flex;
+}
 
 
 /* 星形图标：给「模型选择」一个视觉锚点，避免三个按钮里只有它是纯文字 */
@@ -3142,7 +3603,8 @@ html[data-theme="dark"] .plus-menu-item:hover {
 
 .plus-list-item {
   display: flex;
-  align-items: flex-start;
+  /* 单行布局：图标与文字垂直居中（两行布局时是 flex-start） */
+  align-items: center;
   gap: 10px;
   padding: 8px 10px;
   border-radius: 8px;
@@ -3192,22 +3654,19 @@ html[data-theme="dark"] .plus-menu-item:hover {
   color: var(--accent-color);
 }
 
+/* 名称 / 标签 / 描述同排：与专家面板 .plus-expert-main 同一套对齐方式。
+   name 与 tag 不收缩（名字读全），desc 吃掉剩余宽度并省略号。 */
 .plus-list-body {
   flex: 1;
   min-width: 0;
   display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.plus-list-name-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
+  align-items: baseline;
+  gap: 8px;
 }
 
 .plus-list-name {
+  flex-shrink: 0;
+  max-width: 46%;
   font-size: 13px;
   font-weight: 600;
   color: var(--text-primary);
@@ -3218,6 +3677,8 @@ html[data-theme="dark"] .plus-menu-item:hover {
 
 .plus-list-tag {
   flex-shrink: 0;
+  /* baseline 对齐时小标签会偏上，单独拉回垂直居中 */
+  align-self: center;
   padding: 1px 6px;
   border-radius: 5px;
   font-size: 11px;
@@ -3239,15 +3700,15 @@ html[data-theme="dark"] .plus-menu-item:hover {
 }
 
 .plus-list-desc {
+  flex: 1;
+  min-width: 0;
   font-size: 12px;
   line-height: 1.5;
   color: var(--text-secondary);
-  display: -webkit-box;
-  -webkit-line-clamp: 1;
-  line-clamp: 1;
-  -webkit-box-orient: vertical;
+  /* 单行：line-clamp 在 row 布局下不生效，改用 nowrap + 省略号 */
+  white-space: nowrap;
   overflow: hidden;
-  overflow-wrap: anywhere;
+  text-overflow: ellipsis;
 }
 
 .plus-list-hint {
@@ -3300,14 +3761,69 @@ html[data-theme="dark"] .plus-list-tag.custom {
   color: #c4b5fd;
 }
 
-/* ========== 技能选择弹出面板（对齐参考稿） ========== */
+/* ========== 子面板常驻搜索框（专家 / 连接器） ==========
+   技能面板的同类样式在 SkillPicker.vue 的 scoped style 里，这里需自带一份。 */
+.skill-sub-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 4px 8px;
+  padding: 7px 10px;
+  border-radius: 10px;
+  background: var(--bg-tertiary);
+  border: 1px solid transparent;
+  transition: border-color 0.15s ease;
+}
 
+.skill-sub-search:focus-within {
+  border-color: color-mix(in srgb, var(--accent-color) 45%, transparent);
+}
 
+.skill-sub-search-icon {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+  color: var(--text-secondary);
+}
 
-
+.skill-sub-search-input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-family: inherit;
+  line-height: 1.3;
+}
 
 .skill-sub-search-input::placeholder {
   color: var(--text-secondary);
+}
+
+.skill-sub-search-clear {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.skill-sub-search-clear:hover {
+  color: var(--text-primary);
+}
+
+.skill-sub-search-clear svg {
+  width: 12px;
+  height: 12px;
 }
 
 
@@ -3354,6 +3870,9 @@ html[data-theme="dark"] .plus-list-tag.custom {
   align-items: center;
   gap: 10px;
   width: 100%;
+  /* 本行是 <button>，浏览器默认不继承 font-family（会退回 Arial / 宋体），
+     而连接器行是 <div> 会继承 —— 不写这一行两行文字字体就不一致。 */
+  font-family: inherit;
   /* 与技能面板 .plus-list-item 的行内边距保持一致 */
   padding: 8px 10px;
   border: 1px solid transparent;
@@ -3424,6 +3943,37 @@ html[data-theme="dark"] .plus-list-tag.custom {
   text-overflow: ellipsis;
 }
 
+/* 名称行：默认不占盒（名称与描述同排）；AI 侧边栏（compact）下改为名称 +「已选」一行、描述一行 */
+.plus-expert-name-row {
+  display: contents;
+}
+
+.plus-experts.stacked .plus-expert-row {
+  align-items: flex-start;
+}
+
+.plus-experts.stacked .plus-expert-main {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+}
+
+.plus-experts.stacked .plus-expert-name-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.plus-experts.stacked .plus-expert-name {
+  flex: 1;
+  max-width: none;
+}
+
+.plus-experts.stacked .plus-expert-desc {
+  line-height: 1.5;
+}
+
 .plus-expert-state {
   flex-shrink: 0;
   padding: 1px 6px;
@@ -3492,6 +4042,85 @@ html[data-theme="dark"] .plus-list-tag.custom {
 
 
 
+/* 三段子面板（专家 / 连接器 / 技能）共用同一个外框。
+   技能面板的内容在 SkillPicker.vue 里，但**外框必须由本组件渲染**：
+   外框带了内联的 top/height，syncSubpanelBox 需要能量到"内容自然高度"，
+   而子组件 prop 控制的样式会与量高互相打架（2026-10-24 技能面板搜索后
+   高度不收缩就是这么来的）。宽度由 openSubpanel 通过 SUBPANEL_WIDTH
+   以内联样式给出（与 JS 定位同源）。 */
+.skill-submenu.plus-subpanel {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 16px;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.14);
+  padding: 12px;
+  z-index: 9999;
+  max-width: 90vw;
+}
+
+/* 热桥：面板与一级菜单之间有 6px 水平间隙，鼠标横移时两边都不属于，会先触发
+   mouseleave 计时。向左延 7px（覆盖间隙 + 1px 重叠）把这段空白划给面板。
+   面板底边最低与一级菜单底边平齐（内容少了会往上收），所以再向下延 28px 把
+   「右上角接缝」也划进面板，从菜单项斜着往左上角挪时不会中途掉出去。 */
+.skill-submenu.plus-subpanel::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: -28px;
+  left: -7px;
+  width: 7px;
+}
+
+/* 专家 / 连接器列表容器：.skill-sub-list 的样式原先只写在 SkillPicker.vue 的
+   scoped block 里，作用不到本组件渲染的元素（与上面的 .skill-submenu 同一个坑），
+   结果列表没有 overflow —— 面板超过视口时内容会溢出圆角框外。
+   高度策略：列表不自带上限，由面板统一控制（syncSubpanelBox 按内容自然高度给
+   height，封顶 SUBPANEL_MAX_HEIGHT），列表 flex 撑满剩余空间，超了才滚动；
+   min-height:0 是让 flex 能真正压缩列表的关键。 */
+.skill-sub-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  scrollbar-width: thin;
+}
+
+/* 空态 / 无结果提示：面板高度被锁定时列表区可能很高，单条提示靠垂直居中显示，
+   看起来才像「有意的空状态」而不是「内容没加载出来」。 */
+.skill-sub-list > .skill-sub-hint:only-child,
+.skill-sub-list > .plus-list-hint:only-child {
+  margin: auto 0;
+}
+
+/* ⚠️ 专家 / 连接器面板的空态样式必须在这里再写一份。
+   `.skill-sub-hint` 的完整规则原先只存在于 SkillPicker.vue 的 <style scoped> 里，
+   而 scoped 不跨组件 —— SkillPicker 渲染的技能面板能吃到，本组件渲染的专家 /
+   连接器面板吃不到，表现为「加载中…」「未找到匹配的连接器」是浏览器默认样式：
+   左对齐、深色、无内边距（2026-10-24 用户截图报障）。
+   规格与技能面板完全一致，改一处要两处同步。 */
+.skill-sub-hint {
+  padding: 16px 10px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+.skill-sub-hint.error {
+  color: #dc2626;
+}
+
+/* 标题行 / 搜索框 / 底栏不参与压缩，只有列表可伸缩 */
+.plus-subpanel-head,
+.skill-sub-search,
+.skill-sub-footer {
+  flex: 0 0 auto;
+}
+
 /* 专家/连接器子面板：标题行（无返回按钮，主菜单常驻在旁边） */
 .plus-subpanel-head {
   display: flex;
@@ -3505,6 +4134,61 @@ html[data-theme="dark"] .plus-list-tag.custom {
   font-size: 14px;
   font-weight: 600;
   color: var(--text-primary);
+}
+
+/* 底栏与操作反馈：这三段样式原先只写在 SkillPicker.vue 的 scoped block 里，
+   作用不到本组件渲染的专家 / 连接器面板（底栏按钮曾是无样式的浏览器默认按钮）。
+   规格与技能面板保持一致。 */
+.skill-sub-footer {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 auto;
+}
+
+.skill-sub-footer-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.skill-sub-footer-btn:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.skill-sub-footer-icon {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+}
+
+.skill-sub-notice {
+  margin: 6px 10px 0;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  flex: 0 0 auto;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+}
+
+.skill-sub-notice.error {
+  background: rgba(220, 38, 38, 0.08);
+  color: #dc2626;
 }
 
 

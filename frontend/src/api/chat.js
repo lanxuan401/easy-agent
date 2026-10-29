@@ -102,7 +102,7 @@ export async function attachStream(sessionId, onChunk, signal) {
   await readSSE(response, onChunk, { signal: abortSignal })
 }
 
-export async function sendMessage(sessionId, message, onChunk, signal, enableDeepThink = true, files = [], model = null, enableWebSearch = false, skills = [], pendingExpertId = '', expertAgentId = '') {
+export async function sendMessage(sessionId, message, onChunk, signal, enableDeepThink = true, files = [], model = null, enableWebSearch = false, skills = [], pendingExpertId = '', expertAgentId = '', extra = null) {
   const controller = new AbortController()
   const abortSignal = signal || controller.signal
 
@@ -117,6 +117,8 @@ export async function sendMessage(sessionId, message, onChunk, signal, enableDee
   if (model) {
     payload.model = model
   }
+  // AI 侧边栏附带的页面上下文（用户唤起侧边栏时所在页面），仅供模型参考
+  if (extra && extra.pageContext) payload.page_context = extra.pageContext
   // 已选技能以结构化字段提交（技能目录名），`/目录名` 由后端拼进模型输入（不进落库文本）。
   // 连接器不随消息提交：本会话启用哪些连接器由 /agent/connectors/session 单独设置。
   if (skills && skills.length) payload.skills = skills
@@ -126,6 +128,15 @@ export async function sendMessage(sessionId, message, onChunk, signal, enableDee
   // 本轮使用的专家（我的专家 ID / 公共专家目录名）：专家对话只有一个入口，
   // 后端据此加载提示词、补装依赖技能、做职责范围预检（命中即短路拒答）
   if (expertAgentId) payload.expert_agent_id = expertAgentId
+  // 知识库问答的元数据硬过滤（日期区间 / 标签 / 来源），由知识库工作台传入
+  if (extra && extra.knowledgeMetadataFilter) {
+    payload.knowledge_metadata_filter = extra.knowledgeMetadataFilter
+  }
+  // 新对话首条消息携带的知识库范围：后端建会话后先落 scope 再检索，
+  // 避免“选知识库”阶段提前创建空会话（已有会话仍走 knowledge-scope 接口）
+  if (extra && Array.isArray(extra.knowledgeBaseIds) && extra.knowledgeBaseIds.length) {
+    payload.knowledge_base_ids = extra.knowledgeBaseIds
+  }
 
   const response = await authFetch(`${API_BASE_URL}/agent/chat/stream`, {
     method: 'POST',
