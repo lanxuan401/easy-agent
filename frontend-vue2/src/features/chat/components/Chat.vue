@@ -54,7 +54,7 @@
         :key="msg.id"
         ref="messageEls"
         class="message-wrapper"
-        :class="msg.role"
+        :class="[msg.role, { 'has-compaction': compactRecords.some(r => r.after_message_index === index) }]"
       >
         <ChatMessage
           :message="msg"
@@ -65,6 +65,9 @@
           @reject="handleReject"
           @edit="handleEdit"
         />
+        <div v-for="record in compactRecords.filter(r => r.after_message_index === index)" :key="record.id" class="compaction-status" role="status" aria-live="polite" :aria-busy="record.status === 'running'">
+          <span class="compaction-command" aria-hidden="true">›_</span><span>compact · {{ record.message || '已压缩' }}</span>
+        </div>
       </div>
       </div>
       <button v-if="canGoToNextUserMessage" @click="goToNextUserMessage" class="scroll-btn next" title="回到下一个用户问题">
@@ -121,10 +124,12 @@
         :draft-key="draftKey"
         :consume-pending-skill="!isSidebar"
         @send="onSend"
-        :disabled="isStreaming"
+        :disabled="isStreaming || isCompacting"
+        :compact-disabled-reason="compactDisabledReason"
+        @compact="$emit('compact')"
         :isStreaming="isStreaming"
         :session-id="currentSessionId"
-        :sessionUsage="sessionUsage"
+        :sessionUsage="displayUsage"
         :sessionDuration="sessionDuration"
         :iterationCount="iterationCount"
         :models="models"
@@ -150,6 +155,8 @@
 <script>
 import ChatMessage from './ChatMessage.vue'
 import ChatInput from './ChatInput.vue'
+import chatProps from './chatProps.js'
+import { compactionRecords as mergeCompactionRecords, compactionUsage } from '../../../shared/utils/compactionView.js'
 import TodoListPanel from './TodoListPanel.vue'
 // 首页欢迎语：直接定义在前端（原 src/config.js 已移除）
 const APP_WELCOME_TITLE = 'Easy Agent，让工作化繁为简'
@@ -157,98 +164,7 @@ const APP_WELCOME_TITLE = 'Easy Agent，让工作化繁为简'
 const MAX_PRESET_CARDS = 6
 export default {
   components: { ChatInput, ChatMessage, TodoListPanel },
-  props: {
-  messages: {
-    type: Array,
-    default: () => []
-  },
-  sessionLoading: {
-    type: Boolean,
-    default: false
-  },
-  currentSessionId: {
-    type: String,
-    default: null
-  },
-  sessionCreatedAt: {
-    type: String,
-    default: null
-  },
-  isStreaming: {
-    type: Boolean,
-    default: false
-  },
-  scrollTrigger: {
-    type: Number,
-    default: 0
-  },
-  sessionUsage: {
-    type: Object,
-    default: () => ({ input_tokens: 0, output_tokens: 0, reasoning_tokens: 0 })
-  },
-  sessionDuration: {
-    type: Number,
-    default: 0
-  },
-  iterationCount: {
-    type: Number,
-    default: 0
-  },
-  todos: {
-    type: Array,
-    default: () => []
-  },
-  presetQuestions: {
-    type: Array,
-    default: () => []
-  },
-  workspaceExpanded: {
-    type: Boolean,
-    default: false
-  },
-  sidebarCollapsed: {
-    type: Boolean,
-    default: false
-  },
-  models: {
-    type: Array,
-    default: () => []
-  },
-  selectedModel: {
-    type: String,
-    default: null
-  },
-  welcomeTitle: {
-    type: String,
-    default: APP_WELCOME_TITLE
-  },
-  // main：主页面对话；sidebar：AI 侧边栏（窄栏布局，输入框始终贴底，不展示工作区入口）
-  variant: {
-    type: String,
-    default: 'main'
-  },
-  // 输入草稿的 sessionStorage key：侧边栏与主页面各存一份，互不覆盖
-  draftKey: {
-    type: String,
-    default: 'easy_agent_input_draft'
-  },
-  // 当前会话选中的专家 Agent（{export_agent_id, export_name_cn} 或 null）。
-  // 非空时输入框工具栏显示专家胶囊，且本会话消息走 /agent/chat/stream（带 expert_agent_id）。
-  activeExpert: {
-    type: Object,
-    default: null
-  },
-  // 外部预填的问题（专家详情弹窗点「专家帮你做」示例）：透传给 ChatInput，
-  // 由其写入输入框后通过 expert-prompt-applied 通知 App 清空。
-  expertPrompt: {
-    type: String,
-    default: ''
-  },
-  showManageEntry: {
-    type: Boolean,
-    default: true
-  }
-},
+  props: chatProps,
   data() {
     return {
       // 首页布局模式：center=空会话时输入框居中，bottom=对话中输入框贴底
@@ -263,6 +179,8 @@ export default {
     }
   },
   computed: {
+    compactRecords() { return mergeCompactionRecords(this.messages, this.compactionRecords) },
+    displayUsage() { return compactionUsage(this.messages, this.sessionUsage, this.compactRecords, this.selectedModel) },
     isSidebar() {
       return this.variant === 'sidebar'
     },
@@ -312,6 +230,8 @@ export default {
     }
   },
   watch: {
+    isCompacting() { this.scrollToBottom(true) },
+    compactionRecords() { this.scrollToBottom(true) },
     messages: [
       {
         immediate: true,
@@ -496,7 +416,27 @@ export default {
 </script>
 
 <style scoped>
+.compaction-status {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  width: 80%;
+  max-width: 900px;
+  margin: 0 auto 8px;
+  padding: 0 var(--message-content-inset, 16px);
+  color: var(--text-secondary, #666);
+  font-size: 13px;
+  line-height: 24px;
+  overflow-wrap: anywhere;
+}
+/* 提示紧接消息正文，避免消息底部 padding 与提示间距叠加。 */
+.message-wrapper.has-compaction ::v-deep .message { padding-bottom: 0; }
+.compaction-command { flex-shrink: 0; font-family: monospace; }
+.chat-container.is-sidebar .compaction-status { width: 100%; }
 .chat-container {
+  --message-content-inset: 16px;
   flex: 1;
   /* flex 项默认 min-width:auto 会阻止收缩，工作区展开时聊天区不会让位 */
   min-width: 0;

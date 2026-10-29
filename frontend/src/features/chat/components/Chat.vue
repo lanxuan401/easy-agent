@@ -47,7 +47,7 @@
         :key="msg.id"
         :ref="el => setMessageRef(el, index)"
         class="message-wrapper"
-        :class="msg.role"
+        :class="[msg.role, { 'has-compaction': compactRecords.some(r => r.after_message_index === index) }]"
       >
         <ChatMessage
           :message="msg"
@@ -58,6 +58,9 @@
           @edit="handleEdit"
           @reject="handleReject"
         />
+        <div v-for="record in compactRecords.filter(r => r.after_message_index === index)" :key="record.id" class="compaction-status" role="status" aria-live="polite" :aria-busy="record.status === 'running'">
+          <span class="compaction-command" aria-hidden="true">›_</span><span>compact · {{ record.message || '已压缩' }}</span>
+        </div>
       </div>
       </div>
       <button v-if="canGoToNextUserMessage" @click="goToNextUserMessage" class="scroll-btn next" title="回到下一个用户问题">
@@ -110,10 +113,12 @@
         ref="composerRef"
         class="composer"
         @send="onSend"
-        :disabled="isStreaming"
+        :disabled="isStreaming || isCompacting"
+        :compact-disabled-reason="compactDisabledReason"
+        @compact="emit('compact')"
         :isStreaming="isStreaming"
         :session-id="currentSessionId"
-        :sessionUsage="sessionUsage"
+        :sessionUsage="displayUsage"
         :sessionDuration="sessionDuration"
         :iterationCount="iterationCount"
         :models="models"
@@ -139,91 +144,18 @@ import { ref, watch, nextTick, computed, onMounted, onUnmounted } from 'vue'
 import ChatMessage from './ChatMessage.vue'
 import ChatInput from './ChatInput.vue'
 import TodoListPanel from './TodoListPanel.vue'
-import { APP_WELCOME_TITLE } from '../../../config.js'
+import chatProps from './chatProps.js'
+import { compactionRecords as mergeCompactionRecords, compactionUsage } from '../../../shared/utils/compactionView.js'
 // 首页布局模式：center=空会话时输入框居中，bottom=对话中输入框贴底
 const composerMode = ref('center')
 
 const deckTop = ref(0)
 const deckVisibleCount = 3 // keep
 
-const props = defineProps({
-  messages: {
-    type: Array,
-    default: () => []
-  },
-  sessionLoading: {
-    type: Boolean,
-    default: false
-  },
-  currentSessionId: {
-    type: String,
-    default: null
-  },
-  sessionCreatedAt: {
-    type: String,
-    default: null
-  },
-  isStreaming: {
-    type: Boolean,
-    default: false
-  },
-  scrollTrigger: {
-    type: Number,
-    default: 0
-  },
-  sessionUsage: {
-    type: Object,
-    default: () => ({ input_tokens: 0, output_tokens: 0, reasoning_tokens: 0 })
-  },
-  sessionDuration: {
-    type: Number,
-    default: 0
-  },
-  iterationCount: {
-    type: Number,
-    default: 0
-  },
-  todos: {
-    type: Array,
-    default: () => []
-  },
-  presetQuestions: {
-    type: Array,
-    default: () => []
-  },
-  workspaceExpanded: {
-    type: Boolean,
-    default: false
-  },
-  sidebarCollapsed: {
-    type: Boolean,
-    default: false
-  },
-  models: {
-    type: Array,
-    default: () => []
-  },
-  selectedModel: {
-    type: String,
-    default: null
-  },
-  welcomeTitle: {
-    type: String,
-    default: APP_WELCOME_TITLE
-  },
-  // 当前会话选中的专家 Agent（{export_agent_id, export_name_cn} 或 null）。
-  // 非空时输入框工具栏显示专家胶囊，且本会话消息走 /agent/chat/stream（带 expert_agent_id）。
-  activeExpert: {
-    type: Object,
-    default: null
-  },
-  // 待回填到输入框的问题（专家详情弹窗点「专家帮你做」示例），写入后由
-  // expertPromptApplied 事件通知父组件清空。
-  expertPrompt: {
-    type: String,
-    default: ''
-  }
-})
+const props = defineProps(chatProps)
+const compactRecords = computed(() => mergeCompactionRecords(props.messages, props.compactionRecords))
+const displayUsage = computed(() => compactionUsage(props.messages, props.sessionUsage, compactRecords.value, props.selectedModel))
+watch([() => props.isCompacting, () => props.compactionRecords], () => scrollToBottom(true))
 
 watch([() => props.messages, () => props.messages.length, () => props.sessionLoading], ([newMessages, , loading]) => {
   // 空会话显示居中输入框；有消息时输入框贴底。
@@ -269,7 +201,7 @@ const topbarFloating = computed(
   () => !showSessionTime.value && props.todos.length === 0 && showWorkspaceBtn.value
 )
 
-const emit = defineEmits(['sendMessage', 'stop', 'removeFile', 'createSession', 'approve', 'reject', 'edit', 'update:selectedModel', 'toggleWorkspace', 'clearExpert', 'selectExpert', 'expertPromptApplied', 'openPanel'])
+const emit = defineEmits(['compact', 'sendMessage', 'stop', 'removeFile', 'createSession', 'approve', 'reject', 'edit', 'update:selectedModel', 'toggleWorkspace', 'clearExpert', 'selectExpert', 'expertPromptApplied', 'openPanel'])
 const messagesRef = ref(null)
 
 function formatSessionTime(isoStr) {
@@ -465,7 +397,27 @@ watch(() => props.scrollTrigger, () => {
 </script>
 
 <style scoped>
+.compaction-status {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  width: 80%;
+  max-width: 900px;
+  margin: 0 auto 8px;
+  padding: 0 var(--message-content-inset, 16px);
+  color: var(--text-secondary, #666);
+  font-size: 13px;
+  line-height: 24px;
+  overflow-wrap: anywhere;
+}
+/* 提示紧接消息正文，避免消息底部 padding 与提示间距叠加。 */
+.message-wrapper.has-compaction :deep(.message) { padding-bottom: 0; }
+.compaction-command { flex-shrink: 0; font-family: monospace; }
+.chat-container.is-sidebar .compaction-status { width: 100%; }
 .chat-container {
+  --message-content-inset: 16px;
   flex: 1;
   /* flex 项默认 min-width:auto 会阻止收缩，工作区展开时聊天区不会让位 */
   min-width: 0;

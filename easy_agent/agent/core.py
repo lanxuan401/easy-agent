@@ -49,6 +49,7 @@ from easy_agent.agent.workspace import (
 )
 from easy_agent.agent.subagents import DEFAULT_SUBAGENTS, apply_skill_gated_tools, resolve_subagent_tools
 from easy_agent.agent.summarization import build_summarization_middleware
+from easy_agent.agent.compression_snapshots import PreflightBudgetGuard
 from easy_agent.agent.memory import SessionMemoryMiddleware
 from deepagents.middleware.skills import SkillsMiddleware
 from easy_agent.tools.registry import skill_gated_tool_names
@@ -565,12 +566,25 @@ class EasyAgent(AgentWorkspaceMixin):
 
             # DA-06：同名实例原位替换框架默认的摘要中间件（主代理与每个子代理各一份）。
             # DA-03：主代理的摘要先渲染本轮上下文再计 token；记忆每次运行都重新加载。
-            def summarization(*, render_turn: bool = False):
-                return build_summarization_middleware(
-                    self.config, model, backend, render_turn=render_turn
-                )
+            # Read-only projectors have no per-run state; reuse them for all agents.
+            projectors = []
+            if skills_paths:
+                projectors.append(SkillsMiddleware(backend=backend, sources=skills_paths))
+            if memory_list:
+                projectors.append(SessionMemoryMiddleware(backend=backend, sources=memory_list))
 
-            main_middleware = [*middleware, summarization(render_turn=True)]
+            def summarization(*, render_turn: bool = False):
+                summ = build_summarization_middleware(
+                    self.config, model, backend, render_turn=render_turn, model_key=self.model_name
+                )
+                # These tail middleware inject prompts after summarization. Project
+                # their read-only renderers for the initial estimate; the final
+                # guard also checks tools dynamically disclosed by skills.
+                summ.request_projectors = tuple(projectors)
+                return summ
+
+            main_summarization = summarization(render_turn=True)
+            main_middleware = [*middleware, main_summarization, PreflightBudgetGuard(main_summarization)]
             # DA-13：由技能带出的工具（save_expert）不进 agent 工具列表，交给同名替换默认项的
             # SkillsMiddleware，模型读到 / pin 了在 include_tools 里声明它的技能后才出现
             # DA-13：注册表里标记为 skill_gated 的工具 + 任意 SKILL.md 通过
@@ -605,6 +619,10 @@ class EasyAgent(AgentWorkspaceMixin):
                     )
                 )
 
+            def with_subagent_summarization(spec):
+                summ = summarization()
+                return {**spec, "middleware": [*spec.get("middleware", []), summ, PreflightBudgetGuard(summ)]}
+
             return create_deep_agent(
                 name="easy-agent",
                 model=model,
@@ -621,7 +639,7 @@ class EasyAgent(AgentWorkspaceMixin):
                 # DA-11：子代理工具按名字解析成本图的工具实例（缺工具的子代理不声明）
                 # DA-13：子代理用到 include_tools 工具时，摘出来挂到它自己的 SkillsMiddleware
                 subagents=[
-                    {**spec, "middleware": [*spec.get("middleware", []), summarization()]}
+                    with_subagent_summarization(spec)
                     for spec in apply_skill_gated_tools(
                         resolve_subagent_tools(subagents, [*graph_tools, *gated_tools]),
                         gated_tools,

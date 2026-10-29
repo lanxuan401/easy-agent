@@ -236,6 +236,11 @@ class SummarizationConfig(BaseModel):
     """Conversation summarization/compression configuration"""
 
     enabled: bool = True
+    snapshot_enabled: bool = True  # 每次自动摘要保存压缩前/后的有效请求（会话隔离）
+    trace_enabled: bool = False  # 调试时保存中间摘要/事实清单原文，默认关闭
+    coverage_enabled: bool = True  # 抽取事实并语义检查，增加摘要模型调用
+    input_fraction: float = Field(default=0.55, ge=0.1, le=0.8)
+    max_output_tokens: int | None = Field(default=None, ge=1)  # None = min(4096, 窗口20%)
     compression_threshold: float = (
         0.8  # Trigger compression at this fraction of context window
     )

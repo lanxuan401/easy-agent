@@ -1,3 +1,4 @@
+import chatSessionView from './chatSessionView.js'
 import { setReactive } from '../../../utils/reactiveSet.js'
 import { createSession, listSessions, getChatHistory, deleteSession, sendMessage, resumeStream, renameSession, togglePinSession, attachStream } from '../../../api/chat.js'
 import { deleteFile, getSessionGeneratedFiles } from '../../../api/files.js'
@@ -48,6 +49,7 @@ export function parseMCPResult(rawResult) {
  * - selectedModel：发送时使用的模型
  */
 export default {
+  mixins: [chatSessionView],
   data() {
     return {
       currentSessionId: null,
@@ -82,33 +84,6 @@ export default {
       // 非响应式定时器句柄
       filesCheckTimer: null,
     }
-  },
-  computed: {
-    sessions: {
-      get() { return chatStore.sessions },
-      set(v) { chatStore.sessions = v },
-    },
-    streamingSessions: {
-      get() { return chatStore.streamingSessions },
-      set(v) { chatStore.streamingSessions = v },
-    },
-    pendingApprovalSessions: {
-      get() { return chatStore.pendingApprovalSessions },
-      set(v) { chatStore.pendingApprovalSessions = v },
-    },
-    lastStreamingSession: {
-      get() { return chatStore.lastStreamingSession },
-      set(v) { chatStore.lastStreamingSession = v },
-    },
-    currentSessionCreatedAt() {
-      if (!this.currentSessionId) return null
-      const session = this.sessions.find(s => s.session_id === this.currentSessionId)
-      return session && session.created_at ? session.created_at : null
-    },
-    // 输入框状态：当前展示的会话正在流式时才显示停止按钮与 token 用量
-    isStreaming() {
-      return this.isSessionStreaming(this.currentSessionId)
-    },
   },
   watch: {
     // HITL 历史恢复：切换/重载会话后重建待审批状态
@@ -784,6 +759,7 @@ export default {
       return createChunkHandler(this, ctx)
     },
     async handleSendMessage(message, files = [], signal, enableDeepThink = true, enableWebSearch = false, skills = []) {
+      if (this.isCompacting) return
       const userMsgId = `user-${Date.now()}`
       const preStreamUsage = { ...this.sessionUsage }
       // 记录本次请求开始前已累计的耗时和迭代次数，用于流式过程中实时累加

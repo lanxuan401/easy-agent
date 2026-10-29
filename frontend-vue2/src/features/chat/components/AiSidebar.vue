@@ -206,6 +206,10 @@
               :sessionLoading="sessionLoading"
               :currentSessionId="currentSessionId"
               :isStreaming="isStreaming"
+        :is-compacting="isCompacting"
+        :compact-disabled-reason="compactDisabledReason"
+        :compaction-records="compactionRecords"
+        @compact="handleCompactContext"
               :scrollTrigger="scrollTrigger"
               :sessionUsage="sessionUsage"
               :sessionDuration="sessionDuration"
@@ -315,37 +319,7 @@ import { formatPageContext, setExternalPageContext } from '../../../utils/pageCo
 import { formatRelativeTime } from '../../../utils/relativeTime.js'
 import { eventTarget } from '../../../utils/domEvent.js'
 
-const PREFS_KEY = 'easy_agent_ai_sidebar_prefs'
-const PAGE_SESSIONS_KEY = 'easy_agent_ai_page_sessions'
-const DEFAULT_WIDTH = 440
-const MIN_WIDTH = 340
-const RAIL_WIDTH = 52
-// 小于该宽度的视口强制悬浮全宽显示
-const NARROW_VIEWPORT = 768
-const MAX_PAGE_SESSIONS = 20
-const QUOTE_MAX = 2000
-const DEFAULT_FEATURES = {
-  launcher: true,
-  selectionAsk: true,
-  shortcut: true,
-  dock: true,
-  openInMain: true,
-}
-
-function readJson(storage, key, fallback) {
-  try {
-    const raw = storage.getItem(key)
-    return raw ? JSON.parse(raw) : fallback
-  } catch (_) {
-    return fallback
-  }
-}
-
-function writeJson(storage, key, value) {
-  try {
-    storage.setItem(key, JSON.stringify(value))
-  } catch (_) { /* 存储不可用时忽略 */ }
-}
+import { PREFS_KEY, PAGE_SESSIONS_KEY, DEFAULT_WIDTH, MIN_WIDTH, RAIL_WIDTH, NARROW_VIEWPORT, MAX_PAGE_SESSIONS, QUOTE_MAX, DEFAULT_FEATURES, readJson, writeJson } from '../services/sidebarConfig.js'
 
 export default {
   name: 'AiSidebar',

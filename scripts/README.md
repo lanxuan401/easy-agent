@@ -13,7 +13,7 @@ python scripts/skills/sync_skills.py --check
 
 | 目录 | 用途 | 入口 |
 | --- | --- | --- |
-| `quality/` | CI 质量门禁 / 架构检查 / 配置校验 | `check_config_schema.py`、`check_env_usage.py`、`check_multi_replica.py`、`check_double_write.py`、`import_graph.py` |
+| `quality/` | CI 质量门禁 / 架构检查 / 配置校验 / 压缩评估 | `check_config_schema.py`、`check_env_usage.py`、`check_multi_replica.py`、`check_double_write.py`、`import_graph.py` |
 | `db/` | 数据库迁移与一次性数据修复 | `migrate_db.py`、`migrate_sqlite_to_mysql.py`、`migrate_market_mcp_keys.py`、`prune_checkpoint_threads.py`（清理官方 checkpoint saver 里存量的每消息 / 定时任务 thread，默认只预览） |
 | `deps/` | 离线依赖下载/落盘 | `download_backend_deps.py`、`download_backend_whls.py`、`download_frontend_deps.py`、`place_whls_to_repo.py` |
 | `release/` | 发布前检查 / 变更导出 | `release_preflight.py`、`export_changes.py` |
@@ -46,3 +46,13 @@ python scripts/quality/check_env_usage.py --check
 python scripts/quality/check_multi_replica.py
 python scripts/docs/generate_api_docs.py --check
 ```
+
+
+## 上下文压缩评估
+
+`python scripts/quality/evaluate_compaction.py` 默认仅输出固定合成长会话评估计划；加
+`--run` 才调用配置模型。可通过 `--context-lengths`、`--input-fractions`、
+`--max-output-tokens` 与 `--repeats` 建立预算矩阵，`--baseline` 比较同模型同fixture历史结果。
+结果保存在 gitignored `test-results/compaction-evaluation/`，区分内容质量、压缩指标、
+下一轮回答、独立judge及真实provider usage。费用单价未提供时保持null。
+完整用法与实测见 `docs/2026-10-28-compaction-evaluation.md`。

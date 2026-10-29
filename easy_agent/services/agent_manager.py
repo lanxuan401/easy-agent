@@ -508,6 +508,11 @@ def get_session_edit_target(session_id: str) -> str:
     return _session_edit_targets.get(session_id or "", "")
 
 
+def get_cached_session_agent(session_id: str):
+    """读取已存在的会话代理；摘要操作不得因切换摘要模型驱逐聊天代理。"""
+    return _session_agents.get(session_id)
+
+
 def get_session_expert(session_id: str) -> str:
     """返回会话当前生效的专家 Agent ID（"" 表示通用 Agent）。主要供测试与排查使用。"""
     return _session_expert.get(session_id, "")
@@ -598,9 +603,10 @@ def register_stream_task(session_id: str, task: asyncio.Task[None]) -> None:
     _remember_stream_task(session_id, task)
 
 
-async def aregister_stream_task(session_id: str, task: asyncio.Task[None]) -> None:
+async def aregister_stream_task(session_id: str, task: asyncio.Task[None], *, prelocked: bool = False) -> None:
     """:func:`register_stream_task` 的异步版本：获取跨实例流锁的写库放进线程。"""
-    await run_blocking(_acquire_stream_lock, session_id)
+    if not prelocked:
+        await run_blocking(_acquire_stream_lock, session_id)
     _remember_stream_task(session_id, task)
 
 

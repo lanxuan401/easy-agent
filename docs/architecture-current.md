@@ -20,7 +20,8 @@
 | `agent/hitl.py` | 破坏性命令识别、execute 工具描述、HITL 默认工具 |
 | `persistence/checkpoints.py` | 官方 `AsyncSqliteSaver` 与自研 `PersistentMemorySaver`（裁剪后写业务库） |
 | `persistence/stores.py` | 自研 LangGraph `BaseStore`（SQLite/MySQL） |
-| `agent/summarization.py` | 建图期替换官方摘要工厂 + 缺失降级护栏 |
+| `agent/summarization.py` / `agent/compression_snapshots.py` | 同名替换默认摘要中间件；配置窗口preflight、memory/skills提示投影与最终实际请求guard；自动摘要快照与阶段report |
+| `agent/history_summarizer.py` / `agent/compaction_observability.py` | 按预算分块/递归合并、结构化事实与语义覆盖告警、输出截断/大小检查；ContextVar隔离元数据，可选中间留痕 |
 | `agent/subagents.py` / `agent/skills.py` | 子代理定义；技能发现（根 `skills/` 为 canonical，包内副本回退） |
 | `bootstrap/runtime_config.py` | 运行期配置 + Agent 失效回调注册（架构解耦用） |
 | `bootstrap/config.py` / `config_models.py` / `config_validation.py` | 配置加载（`Config.from_yaml` 把各段交给模型校验，只处理 YAML 写法与模型对不上的地方）与路径 helpers；Pydantic 配置模型（字段名与默认值的唯一来源）；未知/废弃键校验（已知键由模型字段生成）与 `${VAR}` 展开；`config.py` re-export 原有公开名字与兼容私有名 |

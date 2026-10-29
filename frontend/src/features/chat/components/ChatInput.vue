@@ -425,7 +425,7 @@
           <div 
             v-if="showTokenRing" 
             ref="ringRef"
-            class="context-ring-wrapper" 
+            class="context-ring-wrapper" :title="sessionUsage.context_estimated ? '压缩后上下文占用（估算）' : '本轮上下文占用'"
             @click.stop="toggleTokenPopup"
           >
             <svg class="context-ring" viewBox="0 0 36 36">
@@ -452,7 +452,7 @@
                 <div class="token-popup-divider"></div>
                 <div class="token-popup-section">
                 <div class="token-popup-row">
-                  <span class="token-popup-label">本轮上下文占用</span>
+                  <span class="token-popup-label">{{ sessionUsage.context_estimated ? '当前上下文占用（估算）' : '本轮上下文占用' }}</span>
                 </div>
                 <div class="token-popup-context-row">
                   <span class="token-popup-context-value">{{ formatTokens(sessionUsage.context_tokens) }}/{{ formatTokens(sessionUsage.context_length) }}</span>
@@ -516,36 +516,33 @@
         :style="skillPickerStyle"
         @click.stop
       >
-        <div class="skill-picker-header">
-          <span>选择技能</span>
-          <span class="skill-picker-hint">↑↓ 选择 · Enter 确认 · Esc 关闭</span>
-        </div>
-
-        <div v-if="skillPickerLoading" class="skill-picker-state">正在加载技能…</div>
-        <div v-else-if="filteredSkills.length === 0" class="skill-picker-state">
-          {{ skillOptions.length === 0 ? '还没有可用的技能，先到技能中心添加并启用' : '没有匹配的技能' }}
-        </div>
-
-        <ul v-else class="skill-picker-list" role="listbox" aria-label="可用技能">
-          <li
-            v-for="(skill, index) in filteredSkills"
-            :key="skill.dir_name"
-            class="skill-picker-item"
-            :class="{ active: index === skillPickerIndex }"
-            role="option"
-            :aria-selected="index === skillPickerIndex ? 'true' : 'false'"
-            @mouseenter="skillPickerIndex = index"
-            @mousedown.prevent="selectSkill(skill)"
-            @click="selectSkill(skill)"
-          >
-            <SkillIcon :icon="skill.icon" :category="iconCategoryFor(skill.category_id)" size="xs" />
+      <div class="skill-picker-header">
+        <span>指令与技能</span>
+        <span class="skill-picker-hint">↑↓ 选择 · Enter 确认 · Esc 关闭</span>
+      </div>
+      <ul class="skill-picker-list" role="listbox" aria-label="指令与技能">
+        <li v-for="(option, index) in pickerOptions" :key="option.type + ':' + option.dir_name" role="presentation">
+          <div v-if="index === 0 || pickerOptions[index - 1].type !== option.type" class="skill-picker-group">
+            {{ option.type === 'command' ? '指令' : '技能' }}
+          </div>
+          <div class="skill-picker-item" :class="{ active: index === skillPickerIndex, 'command-disabled': option.type === 'command' && compactDisabledReason }"
+            role="option" :aria-selected="index === skillPickerIndex ? 'true' : 'false'"
+            :aria-disabled="option.type === 'command' && !!compactDisabledReason ? 'true' : 'false'"
+            @mouseenter="skillPickerIndex = index" @mousedown.prevent="selectPickerOption(option)" @click="selectPickerOption(option)">
+            <span v-if="option.type === 'command'" aria-hidden="true">↥</span>
+            <SkillIcon v-else :icon="option.icon" :category="iconCategoryFor(option.category_id)" size="xs" />
             <span class="skill-picker-body">
-              <span class="skill-picker-name">{{ skill.name || skill.dir_name }}</span>
-              <span class="skill-picker-desc">{{ skill.description || '暂无描述' }}</span>
+              <span class="skill-picker-name">{{ option.name || option.dir_name }}</span>
+              <span class="skill-picker-desc">{{ option.type === 'command' && compactDisabledReason ? compactDisabledReason : (option.description || '暂无描述') }}</span>
             </span>
-            <span class="skill-picker-slash">/{{ skill.dir_name }}</span>
-          </li>
-        </ul>
+            <span class="skill-picker-slash">/{{ option.dir_name }}</span>
+          </div>
+        </li>
+      </ul>
+      <div v-if="skillPickerLoading" class="skill-picker-state">正在加载技能…</div>
+      <div v-else-if="filteredSkills.length === 0" class="skill-picker-state">
+        {{ skillOptions.length === 0 ? '还没有可用的技能，先到技能中心添加并启用' : '没有匹配的技能' }}
+      </div>
       </div>
     </Teleport>
 
@@ -566,6 +563,7 @@ import { iconCategoryFor } from '../../../utils/skillCategories.js'
 // 镜像层为画出技能芯片的外扩留白，把裁剪盒向外扩了这么多 px（见 .input-mirror 的 padding/margin）：
 // 补滚动条占位时要一起加上，否则镜像内容比 textarea 窄、换行位置对不上。
 const MIRROR_BLEED = 6
+import { useContextCommandPicker } from '../composables/useContextCommandPicker.js'
 import { buildMessageText, parseSlashQuery } from '../../../utils/skillSlash.js'
 // 内联技能标签：标签文字 = textarea 文本里的子串，选中/删除/发送前的剥离都走这套纯逻辑
 import {
@@ -601,6 +599,7 @@ const TEXTAREA_LINE_HEIGHT = 24
 const TEXTAREA_MAX_HEIGHT = TEXTAREA_MAX_ROWS * TEXTAREA_LINE_HEIGHT
 
 const props = defineProps({
+  compactDisabledReason: { type: String, default: '' },
   disabled: {
     type: Boolean,
     default: false
@@ -651,7 +650,7 @@ const props = defineProps({
   }
 })
 
-const emit = defineEmits(['send', 'stop', 'createSession', 'update:selectedModel', 'typing', 'clearExpert', 'selectExpert', 'prefillApplied', 'openPanel'])
+const emit = defineEmits(['compact', 'send', 'stop', 'createSession', 'update:selectedModel', 'typing', 'clearExpert', 'selectExpert', 'prefillApplied', 'openPanel'])
 
 const message = ref('')
 const textareaRef = ref(null)
@@ -898,16 +897,8 @@ const selectedSkillDirs = computed(() => {
  * 描述是一大段英文说明，几乎每个字母都能命中（如 m → manipulate / from / time），
  * 直接参与匹配会让检索看起来「完全没生效」，因此降级为兜底。
  */
-const filteredSkills = computed(() => {
-  const q = skillQuery.value.trim().toLowerCase()
-  if (!q) return skillOptions.value
-  const byName = skillOptions.value.filter(s =>
-    (s.dir_name || '').toLowerCase().includes(q) ||
-    (s.name || '').toLowerCase().includes(q)
-  )
-  if (byName.length > 0) return byName
-  return skillOptions.value.filter(s => (s.description || '').toLowerCase().includes(q))
-})
+const { pickerOptions, selectPickerOption, filteredSkills } = useContextCommandPicker({ props, emit, skillQuery, skillOptions,
+  skillPickerOpen, textareaRef, message, closeSkillPicker, selectSkill, replaceTextWithCaret })
 
 async function loadSkillOptions() {
   const now = Date.now()
@@ -956,7 +947,7 @@ function updateSkillPickerPosition() {
 /** 键盘切换选项时把当前高亮项滚进可视区（只滚列表本身，不带动外层级） */
 function scrollActiveSkillIntoView() {
   const list = skillPickerRef.value?.querySelector('.skill-picker-list')
-  const item = list?.children[skillPickerIndex.value]
+  const item = list?.querySelectorAll('.skill-picker-item')[skillPickerIndex.value]
   if (!list || !item) return
   const top = item.offsetTop
   const bottom = top + item.offsetHeight
@@ -1131,10 +1122,11 @@ function onBeforeInput(event) {
 
 /** 键盘：面板打开时接管 ↑↓ / Enter / Esc，其余情况保持原有 Enter 发送 */
 function onKeydown(event) {
+  if (event.isComposing || event.keyCode === 229) return
   if (handleTokenDeleteKey(event)) return
 
   if (skillPickerOpen.value) {
-    const count = filteredSkills.value.length
+    const count = pickerOptions.value.length
     if (event.key === 'ArrowDown' && count > 0) {
       event.preventDefault()
       skillPickerIndex.value = (skillPickerIndex.value + 1) % count
@@ -1153,10 +1145,10 @@ function onKeydown(event) {
       return
     }
     if ((event.key === 'Enter' && !event.shiftKey) || event.key === 'Tab') {
-      const skill = filteredSkills.value[skillPickerIndex.value]
+      const skill = pickerOptions.value[skillPickerIndex.value]
       if (skill) {
         event.preventDefault()
-        selectSkill(skill)
+        selectPickerOption(skill)
         return
       }
       closeSkillPicker()
@@ -2349,6 +2341,10 @@ defineExpose({ setMessage, getMessage, triggerSend })
 </script>
 
 <style scoped>
+
+.skill-picker-group { padding: 8px 12px 4px; font-size: 12px; color: var(--text-secondary, #888); }
+.command-disabled { opacity: .5; cursor: not-allowed; }
+.skill-picker-list > li { list-style: none; }
 .chat-input-container {
   display: flex;
   flex-direction: column;

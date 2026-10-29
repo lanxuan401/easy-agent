@@ -1866,7 +1866,7 @@ html[data-theme="dark"] .approval-badge.status-rejected {
 
 .message-text {
   background: transparent;
-  padding: 12px 16px;
+  padding: 12px var(--message-content-inset, 16px);
   border-radius: 16px;
   font-size: 16px;
   line-height: 1.7;

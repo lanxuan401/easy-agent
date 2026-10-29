@@ -42,7 +42,7 @@ read_env_api() {
   local url=""
   if [ -f "$env_file" ]; then
     url=$(grep -E "^VITE_API_BASE_URL=" "$env_file" 2>/dev/null | tail -1 | cut -d= -f2- \
-            | sed "s/^[\"']//;s/[\"']$//")
+            | tr -d '\r' | sed "s/^[\"']//;s/[\"']$//")
   fi
   echo "$url"
 }

@@ -57,8 +57,13 @@ external_dirs:
 # ===== 上下文压缩 =====
 summarization:
   enabled: true                    # false = 关闭压缩与参数截断（阈值抬到不可达）
+  snapshot_enabled: true           # 自动摘要前后生成成对 JSON，存入会话隐藏产物目录
+  trace_enabled: false             # 调试开关：保存中间摘要/事实清单原文，生产默认关闭
+  coverage_enabled: true           # 分块抽取事实并语义检查；增加模型调用，缺失时明确告警
+  input_fraction: 0.55             # 摘要请求输入比例；输入+输出须不超过窗口90%
+  max_output_tokens: null          # null = min(4096, 窗口20%)；显式限制摘要输出
   compression_threshold: 0.8       # 上下文用量达到该比例时压缩
-  compression_target: 0.1          # 压缩后保留的上下文比例
+  compression_target: 0.1          # 近期消息保留预算；最终输入还包含摘要/系统提示/工具定义
 
 # ===== 工具 =====
 tools:

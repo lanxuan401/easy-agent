@@ -73,6 +73,10 @@
         :currentSessionId="currentSessionId"
         :sessionCreatedAt="currentSessionCreatedAt"
         :isStreaming="isStreaming"
+        :is-compacting="isCompacting"
+        :compact-disabled-reason="compactDisabledReason"
+        :compaction-records="compactionRecords"
+        @compact="handleCompactContext"
         :scrollTrigger="scrollTrigger"
         :sessionUsage="sessionUsage"
         :sessionDuration="sessionDuration"
@@ -121,6 +125,10 @@
 </template>
 
 <script setup>
+import { sessionCreatedAt } from './shared/utils/sessionListView.js'
+import { parseMCPResult } from './shared/utils/mcpResult.js'
+import { useSessionFiles } from './features/chat/composables/useSessionFiles.js'
+import { useContextCompaction } from './features/chat/composables/useContextCompaction.js'
 import { API_BASE_URL, APP_WELCOME_TITLE, appRuntime } from './config.js'
 import { ref, computed, onMounted, watch, defineAsyncComponent } from 'vue'
 import SessionList from './features/chat/components/SessionList.vue'
@@ -135,7 +143,7 @@ const SettingsPanel = defineAsyncComponent(() => import('./features/settings/com
 import { createSession, listSessions, getChatHistory, deleteSession, sendMessage, resumeStream, renameSession, togglePinSession, getStreamStatus, attachStream } from './api/chat.js'
 import { applyApprovalRequests, buildResumeDecisions, markApprovalDecision, unmatchedApprovalRequests } from './utils/hitlApproval.js'
 import { createStreamChunkHandler } from './features/chat/composables/useStreamChunks.js'
-import { uploadFile, deleteFile, getUserProfile, getSessionGeneratedFiles } from './api/files.js'
+import { uploadFile, deleteFile, getUserProfile } from './api/files.js'
 import { logout as apiLogout, notifyLogout, getStoredToken, getStoredUsername, AUTH_EXPIRED_EVENT, authFetch, passwordlessLogin } from './api/auth.js'
 import { getModels as fetchModels } from './api/settings.js'
 import { getExpertLastSession } from './shared/utils/expertSession.js'
@@ -183,12 +191,7 @@ async function loadModels() {
     console.error('加载模型列表失败:', e)
   }
 }
-const currentSessionCreatedAt = computed(() => {
-  if (!currentSessionId.value) return null
-  const session = sessions.value.find(s => s.session_id === currentSessionId.value)
-  return session?.created_at || null
-})
-let filesCheckTimer = null
+const currentSessionCreatedAt = computed(() => sessionCreatedAt(sessions.value, currentSessionId.value))
 
 // 会话状态缓存：为每个会话保存独立的流式状态
 const sessionStates = ref({})
@@ -198,43 +201,7 @@ const sessionStates = ref({})
 // 错误地存到新会话名下，导致来回切换时 token 用量显示为 0。
 const loadedSessionId = ref(null)
 
-async function refreshSessionFiles(sessionId = null, delayMs = 0) {
-  const targetId = sessionId || currentSessionId.value
-  if (!targetId) {
-    currentSessionHasFiles.value = false
-    return false
-  }
-  if (filesCheckTimer) {
-    clearTimeout(filesCheckTimer)
-    filesCheckTimer = null
-  }
-  const doCheck = async () => {
-    try {
-      const files = await getSessionGeneratedFiles(targetId)
-      const hasFiles = Array.isArray(files) && files.length > 0
-      if (currentSessionId.value === targetId) {
-        currentSessionHasFiles.value = hasFiles
-      }
-      console.log('[Files] Session', targetId, 'has files:', hasFiles, 'count:', files?.length)
-      return currentSessionId.value === targetId && hasFiles
-    } catch (e) {
-      console.error('[Files] 检查会话文件失败:', e)
-      if (currentSessionId.value === targetId) {
-        currentSessionHasFiles.value = false
-      }
-      return false
-    }
-  }
-  if (delayMs > 0) {
-    return await new Promise((resolve) => {
-      filesCheckTimer = setTimeout(() => {
-        doCheck().then(resolve).catch(resolve)
-      }, delayMs)
-    })
-  } else {
-    return await doCheck()
-  }
-}
+const { refreshSessionFiles } = useSessionFiles(currentSessionId, currentSessionHasFiles)
 
 async function expandWorkspaceAfterSessionCompletion(sessionId, delayMs = 500) {
   if (!sessionId) return
@@ -245,6 +212,7 @@ async function expandWorkspaceAfterSessionCompletion(sessionId, delayMs = 500) {
   }
 }
 const messages = ref([])
+const sessionLoading = ref(false)
 // 多个会话可同时流式：记录所有正在流式输出的会话 id（会话列表逐个显示"进行中"徽标）
 const streamingSessions = ref([])
 // 最近开始流式的会话（页面刷新后据此重新挂载）
@@ -258,6 +226,9 @@ const error = ref(null)
 const currentAbortController = ref(null)
 // HITL: 审批待处理状态，存储 { threadId, assistantMsgId }
 const pendingApproval = ref(null)
+const { contextCompactionEnabled, isCompacting, compactionRecords, compactDisabledReason, handleCompactContext } = useContextCompaction({
+  currentSessionId, sessionLoading, messages, isStreaming, pendingApproval, selectedModel,
+})
 const sessionUsage = ref({ input_tokens: 0, output_tokens: 0, reasoning_tokens: 0, context_length: null, auto_compress_tokens: null, context_tokens: 0 })
 // 当前会话累计耗时（秒），每次 AI 回复完成后累加
 const sessionDuration = ref(0)
@@ -796,7 +767,6 @@ const showWelcome = ref(false)
 // 否则会先闪出空会话首页、会话时间下方那条分隔线也会闪一下。
 const isBootstrapping = ref(true)
 // 切换会话时正在从服务器拉取历史：期间不渲染空欢迎页，避免"先闪空会话页再出历史"
-const sessionLoading = ref(false)
 const scrollTrigger = ref(0)
 const userProfile = ref({
   username: '',
@@ -882,6 +852,7 @@ function handleShowScheduledTasks() {
 }
 
 function applyAgentConfig(configData) {
+  contextCompactionEnabled.value = !!configData?.context_compaction_enabled
   if (!configData) return
   if (configData.context_length) {
     sessionUsage.value.context_length = configData.context_length
@@ -1319,34 +1290,8 @@ async function handleTogglePin(sessionId) {
   }
 }
 
-// MCP 工具结果解析：模块级函数，供正常流(handleSendMessage)与 HITL 恢复流(handleToolApproval)共用。
-// 注意：不要把它定义在某个函数内部，否则另一处引用会抛 ReferenceError，
-// 导致 tool_result 事件处理中断、工具一直显示"等待运行结果"。
-function parseMCPResult(rawResult) {
-  // MCP results come as a string representation of a Python list: "[{'type': 'text', 'text': '...'}]"
-  // or JSON format: '[{"type": "text", "text": "..."}]'
-  // Extract just the text content.
-  if (!rawResult) return ''
-  if (typeof rawResult !== 'string') return String(rawResult)
-
-  // Try JSON format first (single quotes replaced with double)
-  try {
-    const jsonStr = rawResult.replace(/'/g, '"')
-    const parsed = JSON.parse(jsonStr)
-    if (Array.isArray(parsed)) {
-      return parsed
-        .filter(item => item.type === 'text')
-        .map(item => item.text)
-        .join('\n\n')
-    }
-  } catch (e) {
-    // Not valid JSON, return as-is
-  }
-  return rawResult
-}
-
-
 async function handleSendMessage(message, files = [], signal, enableDeepThink = true, enableWebSearch = false, skills = [], expertEditId = '') {
+  if (isCompacting.value) return
   const userMsgId = `user-${Date.now()}`
   const preStreamUsage = { ...sessionUsage.value }
   // 记录本次请求开始前已累计的耗时和迭代次数，用于流式过程中实时累加

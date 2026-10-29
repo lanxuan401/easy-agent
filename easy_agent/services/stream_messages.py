@@ -11,6 +11,7 @@
 """
 
 from datetime import datetime
+from hashlib import sha256
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
@@ -108,6 +109,14 @@ def turn_message_text(message: str, files: list | None = None, skills: list | No
     if skills:
         parts.append(f"[使用技能: {', '.join(str(s) for s in skills)}]")
     return " ".join(parts) or (message or "")
+
+
+def history_turn_id(message: dict, index: int) -> str:
+    """旧展示历史无 turn_id 时使用稳定标识，让恢复后的摘要跨轮继续有效。"""
+    if message.get("turn_id"):
+        return str(message["turn_id"])
+    identity = f"{index}:{message.get('timestamp', '')}:{message.get('content', '')}"
+    return "history-" + sha256(identity.encode()).hexdigest()
 
 
 def build_context_messages(

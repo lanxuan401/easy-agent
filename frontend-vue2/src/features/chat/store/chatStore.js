@@ -8,6 +8,9 @@ import Vue from 'vue'
  * 主页面会话列表立即可见，反之亦然。
  */
 export const chatStore = Vue.observable({
+  compactingSessions: [],
+  compactionRecords: {},
+  contextCompactionEnabled: false,
   sessions: [],
   // 所有正在流式输出的会话 id（会话列表逐个显示"进行中"徽标）
   streamingSessions: [],

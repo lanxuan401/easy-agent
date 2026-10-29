@@ -520,6 +520,8 @@ def admin_reset_password(
 async def get_auth_config(
     username: Annotated[str, Depends(get_current_username)],
 ):
+    from easy_agent.services.context_compaction import compaction_supported
+
     _cfg = get_agent_config()
     context_length = 1_000_000
     preset_questions = []
@@ -545,4 +547,5 @@ async def get_auth_config(
         "agent_env": agent_env,
         "idle_logout_minutes": idle_logout_minutes,
         "app_welcome_title": app_welcome_title,
+        "context_compaction_enabled": compaction_supported(),
     }

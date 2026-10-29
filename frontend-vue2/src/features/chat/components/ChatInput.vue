@@ -241,7 +241,7 @@
           <div 
             v-if="showTokenRing" 
             ref="ringRef"
-            class="context-ring-wrapper" 
+            class="context-ring-wrapper" :title="sessionUsage.context_estimated ? '压缩后上下文占用（估算）' : '本轮上下文占用'"
             @click.stop="toggleTokenPopup"
           >
             <span class="context-ring-inner">
@@ -270,7 +270,7 @@
                 <div class="token-popup-divider"></div>
                 <div class="token-popup-section">
                 <div class="token-popup-row">
-                  <span class="token-popup-label">本轮上下文占用</span>
+                  <span class="token-popup-label">{{ sessionUsage.context_estimated ? '当前上下文占用（估算）' : '本轮上下文占用' }}</span>
                 </div>
                 <div class="token-popup-context-row">
                   <span class="token-popup-context-value">{{ formatTokens(sessionUsage.context_tokens) }}/{{ formatTokens(sessionUsage.context_length) }}</span>
@@ -334,35 +334,32 @@
       @click.stop
     >
       <div class="skill-picker-header">
-        <span>选择技能</span>
+        <span>指令与技能</span>
         <span class="skill-picker-hint">↑↓ 选择 · Enter 确认 · Esc 关闭</span>
       </div>
-
+      <ul class="skill-picker-list" role="listbox" aria-label="指令与技能">
+        <li v-for="(option, index) in pickerOptions" :key="option.type + ':' + option.dir_name" role="presentation">
+          <div v-if="index === 0 || pickerOptions[index - 1].type !== option.type" class="skill-picker-group">
+            {{ option.type === 'command' ? '指令' : '技能' }}
+          </div>
+          <div class="skill-picker-item" :class="{ active: index === skillPickerIndex, 'command-disabled': option.type === 'command' && compactDisabledReason }"
+            role="option" :aria-selected="index === skillPickerIndex ? 'true' : 'false'"
+            :aria-disabled="option.type === 'command' && !!compactDisabledReason ? 'true' : 'false'"
+            @mouseenter="skillPickerIndex = index" @mousedown.prevent="selectPickerOption(option)" @click="selectPickerOption(option)">
+            <span v-if="option.type === 'command'" aria-hidden="true">↥</span>
+            <SkillIcon v-else :icon="option.icon" :category="iconCategoryFor(option.category_id)" size="xs" />
+            <span class="skill-picker-body">
+              <span class="skill-picker-name">{{ option.name || option.dir_name }}</span>
+              <span class="skill-picker-desc">{{ option.type === 'command' && compactDisabledReason ? compactDisabledReason : (option.description || '暂无描述') }}</span>
+            </span>
+            <span class="skill-picker-slash">/{{ option.dir_name }}</span>
+          </div>
+        </li>
+      </ul>
       <div v-if="skillPickerLoading" class="skill-picker-state">正在加载技能…</div>
       <div v-else-if="filteredSkills.length === 0" class="skill-picker-state">
         {{ skillOptions.length === 0 ? '还没有可用的技能，先到技能中心添加并启用' : '没有匹配的技能' }}
       </div>
-
-      <ul v-else class="skill-picker-list" role="listbox" aria-label="可用技能">
-        <li
-          v-for="(skill, index) in filteredSkills"
-          :key="skill.dir_name"
-          class="skill-picker-item"
-          :class="{ active: index === skillPickerIndex }"
-          role="option"
-          :aria-selected="index === skillPickerIndex ? 'true' : 'false'"
-          @mouseenter="skillPickerIndex = index"
-          @mousedown.prevent="selectSkill(skill)"
-          @click="selectSkill(skill)"
-        >
-          <SkillIcon :icon="skill.icon" :category="iconCategoryFor(skill.category_id)" size="xs" />
-          <span class="skill-picker-body">
-            <span class="skill-picker-name">{{ skill.name || skill.dir_name }}</span>
-            <span class="skill-picker-desc">{{ skill.description || '暂无描述' }}</span>
-          </span>
-          <span class="skill-picker-slash">/{{ skill.dir_name }}</span>
-        </li>
-      </ul>
     </div>
 
     <div v-if="showFooter" class="input-footer">
@@ -377,6 +374,7 @@ import { uploadFile, deleteFile } from '../../../api/files.js'
 import { getWebSearchStatus, getUploadLimits } from '../../../api/settings.js'
 import { getUserSkills } from '../../../api/skills.js'
 import { iconCategoryFor } from '../../../utils/skillCategories.js'
+import contextCommandPicker from '../mixins/contextCommandPicker.js'
 import { buildMessageText, parseSlashQuery } from '../../../utils/skillSlash.js'
 // 内联技能标签：标签文字 = textarea 文本里的子串，选中/删除/发送前的剥离都走这套纯逻辑
 import {
@@ -435,9 +433,10 @@ const TEXTAREA_LINE_HEIGHT = 24
 const TEXTAREA_MAX_HEIGHT = TEXTAREA_MAX_ROWS * TEXTAREA_LINE_HEIGHT
 
 export default {
-  mixins: [promptEnhancement],
+  mixins: [promptEnhancement, contextCommandPicker],
   components: { PromptEnhancementControls, FileIcon, SkillIcon, KnowledgeScopeSelector, UploadTray, ModelPicker, PlusMenu, ExpertSubpanelList, PlusList, PlusSubpanelHeader },
   props: {
+    compactDisabledReason: { type: String, default: '' },
     disabled: {
       type: Boolean,
       default: false
@@ -721,16 +720,6 @@ export default {
      * 描述是一大段英文说明，几乎每个字母都能命中（如 m → manipulate / from / time），
      * 直接参与匹配会让检索看起来「完全没生效」，因此降级为兜底。
      */
-    filteredSkills() {
-      const q = this.skillQuery.trim().toLowerCase()
-      if (!q) return this.skillOptions
-      const byName = this.skillOptions.filter(s =>
-        (s.dir_name || '').toLowerCase().includes(q) ||
-        (s.name || '').toLowerCase().includes(q)
-      )
-      if (byName.length > 0) return byName
-      return this.skillOptions.filter(s => (s.description || '').toLowerCase().includes(q))
-    },
     // 后台未返回耗时数据（sessionDuration<=0）且「会话信息」弹窗打开时，前端按 1s
     // 间隔本地计时，让会话耗时实时更新；后台有数据时直接用后台值。
     shouldCountLive() {
@@ -894,6 +883,7 @@ export default {
     if (this.expertPrompt) this.applyExpertPrompt(this.expertPrompt)
   },
   beforeDestroy() {
+
     document.removeEventListener('click', this.closeTokenPopup)
     document.removeEventListener('click', this.closeSkillPickerOnClick)
     window.removeEventListener('resize', this.handleViewportChange)
@@ -905,6 +895,7 @@ export default {
     if (this._uploadNoticeTimer) clearTimeout(this._uploadNoticeTimer)
   },
   methods: {
+
     async toggleWebSearch() {
       if (this.isStreaming || this.disabled) return
       // 页面加载可能早于后端配置完成（状态在 mounted 固化）：
@@ -1958,7 +1949,7 @@ export default {
       const picker = this.$refs.skillPickerRef
       if (!picker) return
       const list = picker.querySelector('.skill-picker-list')
-      const item = list && list.children[this.skillPickerIndex]
+      const item = list && list.querySelectorAll('.skill-picker-item')[this.skillPickerIndex]
       if (!list || !item) return
       const top = item.offsetTop
       const bottom = top + item.offsetHeight
@@ -2121,10 +2112,11 @@ export default {
 
     /** 键盘：面板打开时接管 ↑↓ / Enter / Esc，其余情况保持原有 Enter 发送 */
     onKeydown(event) {
+      if (event.isComposing || event.keyCode === 229) return
       if (this.handleTokenDeleteKey(event)) return
 
       if (this.skillPickerOpen) {
-        const count = this.filteredSkills.length
+        const count = this.pickerOptions.length
         if (event.key === 'ArrowDown' && count > 0) {
           event.preventDefault()
           this.skillPickerIndex = (this.skillPickerIndex + 1) % count
@@ -2143,10 +2135,10 @@ export default {
           return
         }
         if ((event.key === 'Enter' && !event.shiftKey) || event.key === 'Tab') {
-          const skill = this.filteredSkills[this.skillPickerIndex]
+          const skill = this.pickerOptions[this.skillPickerIndex]
           if (skill) {
             event.preventDefault()
-            this.selectSkill(skill)
+            this.selectPickerOption(skill)
             return
           }
           this.closeSkillPicker()
@@ -2180,6 +2172,10 @@ export default {
 </script>
 
 <style scoped>
+
+.skill-picker-group { padding: 8px 12px 4px; font-size: 12px; color: var(--text-secondary, #888); }
+.command-disabled { opacity: .5; cursor: not-allowed; }
+.skill-picker-list > li { list-style: none; }
 .chat-input-container {
   display: flex;
   flex-direction: column;

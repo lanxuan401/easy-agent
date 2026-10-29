@@ -162,3 +162,8 @@ function generateMessageId() {
 export function createNewChat(sessionId, onChunk) {
   return sendMessage(sessionId, '', onChunk)
 }
+
+export async function compactSessionContext(sessionId, model) {
+  return request({ url: `/agent/sessions/${encodeURIComponent(sessionId)}/context/compact`,
+    method: 'post', data: { model: model || null }, timeout: 330000 }, '上下文压缩失败，请重试')
+}

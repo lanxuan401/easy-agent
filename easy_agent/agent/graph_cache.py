@@ -292,6 +292,11 @@ def summarization_fingerprint(config: Any) -> dict[str, Any]:
     summ = getattr(config, "summarization", None)
     return {
         "enabled": bool(getattr(summ, "enabled", True)),
+        "snapshot_enabled": bool(getattr(summ, "snapshot_enabled", True)),
+        "trace_enabled": bool(getattr(summ, "trace_enabled", False)),
+        "coverage_enabled": bool(getattr(summ, "coverage_enabled", True)),
+        "input_fraction": float(getattr(summ, "input_fraction", 0.55)),
+        "max_output_tokens": getattr(summ, "max_output_tokens", None),
         "compression_threshold": float(
             getattr(summ, "compression_threshold", 0.8) or 0.8
         ),

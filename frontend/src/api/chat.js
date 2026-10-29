@@ -186,3 +186,17 @@ function generateMessageId() {
 export function createNewChat(sessionId, onChunk) {
   return sendMessage(sessionId, '', onChunk)
 }
+
+export async function compactSessionContext(sessionId, model) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 330000)
+  try {
+    const response = await authFetch(`${API_BASE_URL}/agent/sessions/${encodeURIComponent(sessionId)}/context/compact`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: model || null }), signal: controller.signal,
+    })
+    const data = await response.json()
+    if (!response.ok) throw new Error(data.detail || '上下文压缩失败，请重试')
+    return data
+  } finally { clearTimeout(timer) }
+}

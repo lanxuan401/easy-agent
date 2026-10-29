@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 _logged_models: set[str] = set()
 
 
-def summarization_settings(config, model) -> dict:
+def summarization_settings(config, model, *, model_key: str | None = None) -> dict:
     """把 config 比例折成官方 ``SummarizationMiddleware`` 的 token 参数。"""
     from easy_agent.agent.model import resolve_context_length
 
@@ -43,15 +43,16 @@ def summarization_settings(config, model) -> dict:
                 "truncation_text": "...(argument truncated)",
             },
         }
-    model_name = getattr(model, "model_name", None) or getattr(model, "model", None)
+    model_name = model_key or getattr(model, "model_name", None) or getattr(model, "model", None)
     model_max = resolve_context_length(config, model_name if isinstance(model_name, str) else None)
     trigger = max(1, int(model_max * thr))
     keep = max(1, int(model_max * tgt))
-    trim = max(4000, int(model_max * 0.02))
     return {
         "trigger": ("tokens", trigger),
         "keep": ("tokens", keep),
-        "trim_tokens_to_summarize": trim,
+        # The custom summarizer applies a model-window budget without dropping the
+        # beginning of the older history before it has a chance to summarize it.
+        "trim_tokens_to_summarize": None,
         "truncate_args_settings": {
             "trigger": ("tokens", trigger),
             "keep": ("tokens", keep),
@@ -61,22 +62,46 @@ def summarization_settings(config, model) -> dict:
     }
 
 
-def build_summarization_middleware(config, model, backend, *, render_turn: bool = False):
+def build_summarization_middleware(config, model, backend, *, render_turn: bool = False, model_key: str | None = None):
     """按 config 阈值构造官方摘要中间件；每个代理（主代理 / 各子代理）各用一份。
 
     ``render_turn=True``（只给主代理）：先把本轮用户消息换成 ``turn_context`` 里的渲染
     内容再计 token / 摘要，见 ``agent/turn_context.py``（DA-03）。
     """
-    from deepagents.middleware.summarization import SummarizationMiddleware
+    from easy_agent.agent.compression_snapshots import SnapshotSummarizationMiddleware
+    from easy_agent.agent.history_summarizer import HistorySummarizer
+    from easy_agent.agent.model import resolve_context_length
+    from langchain_core.runnables import RunnableLambda
 
     from easy_agent.agent.turn_context import TurnAwareSummarizationMiddleware
 
-    settings = summarization_settings(config, model)
+    settings = summarization_settings(config, model, model_key=model_key)
+    model_name = model_key or getattr(model, "model_name", None) or getattr(model, "model", None)
+    model_max = resolve_context_length(
+        config, model_name if isinstance(model_name, str) else None
+    )
+    if bool(getattr(config.summarization, "enabled", True)):
+        history_summarizer = HistorySummarizer(
+            model, model_max,
+            input_fraction=float(getattr(config.summarization, "input_fraction", 0.55)),
+            max_output_tokens=getattr(config.summarization, "max_output_tokens", None),
+            coverage_enabled=bool(getattr(config.summarization, "coverage_enabled", True)),
+        )
+        settings["summarizer"] = RunnableLambda(
+            history_summarizer.invoke,
+            afunc=history_summarizer.ainvoke,
+        )
     label = str(getattr(model, "model_name", None) or getattr(model, "model", None) or "model")
     if label not in _logged_models:
         _logged_models.add(label)
         logger.info(
             "摘要阈值 | %s | trigger=%s keep=%s", label, settings["trigger"], settings["keep"]
         )
-    cls = TurnAwareSummarizationMiddleware if render_turn else SummarizationMiddleware
-    return cls(model, backend=backend, **settings)
+    cls = TurnAwareSummarizationMiddleware if render_turn else SnapshotSummarizationMiddleware
+    return cls(
+        model, backend=backend,
+        snapshot_enabled=bool(getattr(config.summarization, "snapshot_enabled", True)),
+        trace_enabled=bool(getattr(config.summarization, "trace_enabled", False)),
+        context_length=model_max,
+        **settings,
+    )

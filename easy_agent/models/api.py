@@ -1,6 +1,6 @@
 """Pydantic Models for API Request/Response"""
 
-from typing import Any, List, Optional
+from typing import Literal, Any, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -391,7 +391,20 @@ class PresetQuestionGroup(BaseModel):
     questions: list[str] = []
 
 
+class CompactContextRequest(BaseModel):
+    model: str | None = None
+
+
+class CompactContextResponse(BaseModel):
+    session_id: str
+    status: Literal["compacted", "skipped"]
+    message: str
+    compaction: dict[str, Any] | None = None
+    reason: str | None = None
+
+
 class AuthConfigResponse(BaseModel):
+    context_compaction_enabled: bool = False
     context_length: int
     preset_questions: list[PresetQuestionGroup]
     win: bool

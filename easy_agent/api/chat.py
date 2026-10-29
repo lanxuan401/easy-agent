@@ -84,6 +84,7 @@ from easy_agent.services.streaming.orchestrator import (
     chat_stream_generator as _host_chat_stream_generator,
 )
 from easy_agent.services import get_agent_config as _get_agent_config
+from easy_agent.services.session_guard import ChatSessionGuard, guard_chat_session
 from easy_agent.services.session_thread import (
     StaleApprovalError,
     abandon_pending_approval,
@@ -465,7 +466,7 @@ async def _clear_previous_events(db, session_id: str, sid: str) -> None:
 
 async def _drive_stream(
     gen, hub, queue: asyncio.Queue, emitter: SSEEmitter,
-    session_id: str, sid: str, renew_stream, db, run_id,
+    session_id: str, sid: str, renew_stream, db, run_id, lease=None,
 ) -> None:
     """后台任务：推进生成器，把每个 SSE 分片广播给 hub 的全部订阅者（原始客户端队列也是其一）。
 
@@ -478,7 +479,10 @@ async def _drive_stream(
     run_status = "failed"
     run_error = ""
     try:
-        await aregister_stream_task(session_id, bg)
+        if lease is None:
+            await aregister_stream_task(session_id, bg)
+        else:
+            await aregister_stream_task(session_id, bg, prelocked=True)
         registered = True
         if db is not None:
             await _clear_previous_events(db, session_id, sid)
@@ -523,7 +527,7 @@ async def _drive_stream(
 
 
 async def _detached_event_stream(
-    gen, session_id: str, sid: str, renew_stream=None, db=None, run_id=None
+    gen, session_id: str, sid: str, renew_stream=None, db=None, run_id=None, lease=None
 ):
     """以「后台任务 + 事件中枢」驱动流式生成器，与客户端断开解耦。
 
@@ -553,11 +557,15 @@ async def _detached_event_stream(
         _session_stream_hubs[session_id] = hub
     queue: asyncio.Queue = hub.subscribe()
 
+    if lease is not None:
+        lease.retain()
     bg_task = asyncio.create_task(
-        _drive_stream(gen, hub, queue, emitter, session_id, sid, renew_stream, db, run_id)
+        _drive_stream(gen, hub, queue, emitter, session_id, sid, renew_stream, db, run_id, lease)
     )
     _detached_bg_tasks.add(bg_task)
     bg_task.add_done_callback(_detached_bg_tasks.discard)
+    if lease is not None:
+        bg_task.add_done_callback(lambda _task: lease.release())
     try:
         while True:
             item = await queue.get()
@@ -579,6 +587,7 @@ async def chat_stream(
     db: Annotated[ChatRepository, Depends(get_chat_repository)],
     http_request: Request,
     username: Annotated[str, Depends(get_current_username)],
+    session_guard: Annotated[ChatSessionGuard, Depends(guard_chat_session)] = None,
 ):
     repo = _as_chat_repository(db)
     require_turn_content(request.message, request.files, request.skills)
@@ -612,6 +621,8 @@ async def chat_stream(
 
     # 并发互斥：同一会话同一时刻只允许一条流式生成
     reject_concurrent_stream(session_id)
+    if session_guard is not None:
+        session_guard.acquire(repo.database, session_id)
 
     # ── 专家分支：提示词加载 + 依赖技能补装 + 职责范围预检（硬闸）──────────
     # 顺序不能动：预检必须早于文件解析与知识库检索——被拒答的消息不该为这些付成本，
@@ -673,6 +684,7 @@ async def chat_stream(
                 sid,
                 renew_stream=repo.renew_stream,
                 db=repo.database,
+                lease=session_guard.lease if session_guard else None,
             )
         )
 
@@ -808,6 +820,7 @@ async def chat_stream(
             renew_stream=repo.renew_stream,
             db=repo.database,
             run_id=run_id,
+            lease=session_guard.lease if session_guard else None,
         )
     )
 
@@ -865,6 +878,7 @@ async def chat_resume(
     db: Annotated[ChatRepository, Depends(get_chat_repository)],
     http_request: Request,
     username: Annotated[str, Depends(get_current_username)],
+    session_guard: Annotated[ChatSessionGuard, Depends(guard_chat_session)] = None,
 ):
     repo = _as_chat_repository(db)
     session_id = request.session_id
@@ -882,6 +896,8 @@ async def chat_resume(
 
     # 同一会话已有流在跑时拒绝 resume（它依赖进程内缓存与 checkpointer 状态）。
     reject_concurrent_stream(session_id)
+    if session_guard is not None:
+        session_guard.acquire(repo.database, session_id)
 
     # 审批句柄由后端固定生成 ``f"{session_id}-{message_id}"``；绝不信任前端
     # 传入的任意 thread_id：官方 SQLite checkpointer 是全局共享的，否则可读取/
@@ -972,6 +988,7 @@ async def chat_resume(
             renew_stream=repo.renew_stream,
             db=repo.database,
             run_id=run_id,
+            lease=session_guard.lease if session_guard else None,
         )
     )
 
@@ -984,9 +1001,29 @@ _chat_live_mount.include_router(chat_live_router)
 router.routes.extend(_chat_live_mount.routes)
 
 
+async def _guarded_host_chat_stream(request, db, http_request, username):
+    """知识域直接调用宿主时不经过 Depends，也必须持有准备阶段租约。"""
+    from starlette.background import BackgroundTasks
+
+    guard = ChatSessionGuard()
+    try:
+        response = await chat_stream(request, db, http_request, username, session_guard=guard)
+    except BaseException:
+        if guard.lease is not None:
+            guard.lease.release()
+        raise
+    if guard.lease is not None:
+        tasks = BackgroundTasks()
+        if response.background is not None:
+            tasks.add_task(response.background)
+        tasks.add_task(guard.lease.release)
+        response.background = tasks
+    return response
+
+
 # A1：知识域通过端口取宿主能力；api.chat 是应用启动必经路径，负责注册真实实现。
 register_host_capabilities(
-    chat_stream=chat_stream,
+    chat_stream=_guarded_host_chat_stream,
     host_chat_stream_generator=_host_chat_stream_generator,
     cancel_stream_task=cancel_stream_task,
     remove_session_agent=remove_session_agent,

@@ -20,6 +20,8 @@ from easy_agent.api.deps import (  # noqa: F401 - 旧模块级名字 re-export
 )
 from easy_agent.models.db import SessionModel
 from easy_agent.models.api import (
+    CompactContextRequest,
+    CompactContextResponse,
     SessionPinUpdateResponse,
     SessionTitleUpdateResponse,
     SessionUploadResponse,
@@ -235,6 +237,9 @@ async def get_session(
 
     session = repo.get_owned_session(session_id, username)
 
+    from easy_agent.services.context_compaction import compaction_messages
+
+    display_messages = await compaction_messages(session_id, session.messages or [])
     usage = compute_session_usage(session.messages or [])
     context_length = get_context_length()
 
@@ -243,7 +248,7 @@ async def get_session(
         title=session.title,
         created_at=session.created_at,
         updated_at=session.updated_at,
-        messages=session.messages,
+        messages=display_messages,
         todos=session.todos,
         usage=usage,
         context_length=context_length,
@@ -393,13 +398,16 @@ async def get_chat_history(
 
     session = repo.get_owned_session(session_id, username)
 
+    from easy_agent.services.context_compaction import compaction_messages
+
+    display_messages = await compaction_messages(session_id, session.messages or [])
     usage = compute_session_usage(session.messages or [])
     context_length = get_context_length()
 
     return GetChatHistoryResponse(
         session_id=session.session_id,
         title=session.title,
-        messages=session.messages,
+        messages=display_messages,
         created_at=session.created_at,
         updated_at=session.updated_at,
         usage=usage,
@@ -537,3 +545,15 @@ async def upload_session_file(
         "parsed_path": parsed_entry.get("stored_path") if parsed_entry else None,
         "parse_status": parsed_entry.get("status") if parsed_entry else None,
     }
+
+
+@router.post("/{session_id}/context/compact", response_model=CompactContextResponse)
+async def compact_context(
+    session_id: str,
+    request: CompactContextRequest,
+    db: Annotated[SessionRepository, Depends(get_session_repository)],
+    username: Annotated[str, Depends(get_current_username)],
+):
+    from easy_agent.services.context_compaction import compact_session
+
+    return await compact_session(_as_session_repository(db), session_id, username, request.model)

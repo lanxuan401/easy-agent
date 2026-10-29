@@ -22,9 +22,11 @@ from __future__ import annotations
 
 from typing import Annotated, Any, NotRequired, TypedDict
 
-from deepagents.middleware.summarization import SummarizationMiddleware, SummarizationState
+from easy_agent.agent.compaction_state import CompactionState
 from langchain.agents.middleware.types import OmitFromOutput
 from langchain_core.messages import AIMessage
+
+from easy_agent.agent.compression_snapshots import SnapshotSummarizationMiddleware
 
 TURN_CONTEXT_KEY = "turn_context"
 
@@ -39,7 +41,7 @@ class TurnContext(TypedDict):
     content: str
 
 
-class TurnContextSummarizationState(SummarizationState):
+class TurnContextSummarizationState(CompactionState):
     """摘要状态 + ``turn_context``（只进输入，不进输出）。"""
 
     turn_context: Annotated[NotRequired[TurnContext | None], OmitFromOutput]
@@ -125,7 +127,7 @@ def render_turn_request(request):
     return request if rendered is request.messages else request.override(messages=rendered)
 
 
-class TurnAwareSummarizationMiddleware(SummarizationMiddleware):
+class TurnAwareSummarizationMiddleware(SnapshotSummarizationMiddleware):
     """主代理的摘要中间件：先渲染本轮上下文，再按渲染后的请求计 token、决定是否摘要。"""
 
     state_schema = TurnContextSummarizationState

@@ -288,6 +288,7 @@ export function init(options = {}) {
 
     try {
       const cfg = await request({ url: '/agent/auth/config', method: 'get' })
+      chatStore.contextCompactionEnabled = !!cfg?.context_compaction_enabled
       if (cfg && cfg.context_length) chatStore.contextLength = cfg.context_length
     } catch (_) { /* 非关键 */ }
     try {

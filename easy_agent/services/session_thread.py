@@ -33,7 +33,7 @@ from easy_agent.persistence.checkpoints import (
     per_pod_checkpoints_active,
 )
 from easy_agent.services.hitl_state import pending_hitl_interrupts
-from easy_agent.services.stream_messages import build_context_messages
+from easy_agent.services.stream_messages import build_context_messages, history_turn_id
 
 logger = logging.getLogger(__name__)
 
@@ -118,9 +118,9 @@ class TurnPlan:
 
 def _row_turn_ids(history: list[dict]) -> dict[str, int]:
     return {
-        str(row["turn_id"]): index
+        history_turn_id(row, index): index
         for index, row in enumerate(history)
-        if row.get("role") == "user" and row.get("turn_id")
+        if row.get("role") == "user"
     }
 
 
