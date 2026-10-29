@@ -6,7 +6,7 @@ config.py**；``config.py`` re-export 本模块全部模型，``from easy_agent.
 import LLMConfig`` 等既有导入路径不变。
 """
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -242,6 +242,16 @@ class SummarizationConfig(BaseModel):
     compression_target: float = (
         0.1  # Keep this fraction of context window after compression
     )
+
+
+class PromptEnhancementConfig(BaseModel):
+    """独立草稿增强预算；固定使用 DeepSeek 配置，不跟随聊天模型。"""
+
+    model: Literal["deepseek"] = "deepseek"
+    timeout_seconds: float = Field(default=30, gt=0, le=120)
+    max_input_chars: int = Field(default=10000, gt=0, le=100000)
+    max_output_chars: int = Field(default=20000, gt=0, le=200000)
+    max_output_tokens: int = Field(default=8192, gt=0, le=32768)
 
 
 class WebSearchConfig(BaseModel):

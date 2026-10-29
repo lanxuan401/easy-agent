@@ -72,7 +72,8 @@
           ></textarea>
         </div>
       </div>
-      
+
+      <PromptEnhancementControls mode="status" :state="enhancement" />
       <div class="input-actions">
         <div class="left-actions">
             <!-- 「+」添加菜单：添加文件 / 专家 / 技能 / 连接器（Vue 2.7 无 Teleport，菜单留在 wrapper 内） -->
@@ -187,7 +188,6 @@
             hidden
           />
 
-
           <ModelPicker
             :models="models"
             :selected-model="selectedModel"
@@ -237,6 +237,7 @@
         </div>
         
         <div class="right-actions">
+          <PromptEnhancementControls :state="enhancement" :can-enhance="canEnhance" @enhance="enhanceDraft" />
           <div 
             v-if="showTokenRing" 
             ref="ringRef"
@@ -301,7 +302,7 @@
             @click="send" 
             class="action-btn send-btn"
             :class="{ active: canSend }"
-            :disabled="!canSend || disabled"
+            :disabled="!canSend || disabled || enhancement.busy"
             v-tip="'发送（Enter）'"
           >
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -371,6 +372,7 @@
 </template>
 
 <script>
+import promptEnhancement from '../mixins/promptEnhancement.js'
 import { uploadFile, deleteFile } from '../../../api/files.js'
 import { getWebSearchStatus, getUploadLimits } from '../../../api/settings.js'
 import { getUserSkills } from '../../../api/skills.js'
@@ -405,6 +407,7 @@ import PlusSubpanelHeader from './PlusSubpanelHeader.vue'
 import PlusList from './PlusList.vue'
 import PlusMenu from './PlusMenu.vue'
 import ModelPicker from './ModelPicker.vue'
+import PromptEnhancementControls from './PromptEnhancementControls.vue'
 import UploadTray from './UploadTray.vue'
 import FileIcon from '../../../shared/components/FileIcon.vue'
 import SkillIcon from '../../../shared/components/SkillIcon.vue'
@@ -432,7 +435,8 @@ const TEXTAREA_LINE_HEIGHT = 24
 const TEXTAREA_MAX_HEIGHT = TEXTAREA_MAX_ROWS * TEXTAREA_LINE_HEIGHT
 
 export default {
-  components: { FileIcon, SkillIcon, KnowledgeScopeSelector, UploadTray, ModelPicker, PlusMenu, ExpertSubpanelList, PlusList, PlusSubpanelHeader },
+  mixins: [promptEnhancement],
+  components: { PromptEnhancementControls, FileIcon, SkillIcon, KnowledgeScopeSelector, UploadTray, ModelPicker, PlusMenu, ExpertSubpanelList, PlusList, PlusSubpanelHeader },
   props: {
     disabled: {
       type: Boolean,
@@ -918,6 +922,7 @@ export default {
       this.webSearchEnabled = !this.webSearchEnabled
     },
     applyExpertPrompt(val) {
+      this._promptEnhancer.invalidate()
       if (!val) return
       this.message = val
       this.$nextTick(() => {
@@ -939,6 +944,7 @@ export default {
     },
     /** 供父组件调用：替换输入内容（如侧边栏的快捷提问、划词提问） */
     setDraft(text) {
+      this._promptEnhancer.invalidate()
       this.message = text || ''
       this.$nextTick(() => this.autoResize())
       this.focusInput()
@@ -1733,7 +1739,7 @@ export default {
       this.uploadedFiles = [...this.uploadedFiles]
     },
     async send() {
-      if (!this.canSend || this.disabled) return
+      if (!this.canSend || this.disabled || this.enhancement.busy) return
 
       // 等待所有文件上传完成
       const uploadingFiles = this.uploadedFiles.filter(f => f.uploadStatus === 'uploading')
@@ -1834,6 +1840,7 @@ export default {
       mirror.scrollTop = ta.scrollTop
     },
     onInput(event) {
+      this._promptEnhancer.invalidate()
       const ta = (event && event.target) || this.$refs.textareaRef
       // 移动端兜底（见 utils/skillPillTokens.js 的 reconcileTokenDeletion）：Android Chrome 的
       // Backspace 不给 keydown、部分浏览器也没有 beforeinput，浏览器只啃掉标签的一两个字时，
@@ -2291,7 +2298,6 @@ export default {
   right: 11px;
 }
 
-
 .input-skill-pill:hover::before {
   background: color-mix(in srgb, var(--accent-color) 32%, var(--bg-secondary));
 }
@@ -2342,11 +2348,6 @@ export default {
    刚好给出同样的结果，两套主题观感一致。 */
 
 /* ── 连接器面板：行内「会话级开关」（只影响本次会话的 Agent 工具集，不写 mcp.json） ── */
-
-
-
-
-
 
 /* 提交中：明确禁止态（正常状态下开关任何一端都能点） */
 
@@ -2583,10 +2584,6 @@ html[data-theme="dark"] .connector-switch.on {
 
 
 
-
-
-
-
 /* 失败卡片上的「重试」：仅可重试的失败（非单文件超限）才渲染 */
 
 
@@ -2753,6 +2750,8 @@ html[data-theme="dark"] .context-ring-wrapper {
 
 .input-actions {
   display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
   align-items: center;
   justify-content: space-between;
   padding: 8px 16px 12px;
@@ -2858,6 +2857,7 @@ html[data-theme="dark"] .plus-list-tag.custom {
 
 
 .right-actions {
+  margin-left: auto;
   display: flex;
   align-items: center;
   gap: 8px;

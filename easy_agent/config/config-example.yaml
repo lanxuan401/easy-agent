@@ -220,3 +220,11 @@ knowledge:
   #     user: ""
   #     password: ""
   #     charset: "utf8mb4"
+
+# 输入框提示词增强（独立 SDK 调用；仅引用 models.deepseek）
+prompt_enhancement:
+  model: deepseek
+  timeout_seconds: 30
+  max_input_chars: 10000
+  max_output_chars: 20000
+  max_output_tokens: 8192

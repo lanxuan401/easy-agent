@@ -70,7 +70,8 @@
           ></textarea>
         </div>
       </div>
-      
+
+      <PromptEnhancementControls mode="status" :state="enhancement" />
       <div class="input-actions">
         <div class="left-actions">
             <!-- 「+」添加菜单：添加文件 / 专家 / 技能 / 连接器（参考同类输入框的 + 交互） -->
@@ -370,7 +371,6 @@
             hidden
           />
 
-
           <ModelPicker
             :models="models"
             :selected-model="selectedModel"
@@ -421,6 +421,7 @@
         </div>
         
         <div class="right-actions">
+          <PromptEnhancementControls :state="enhancement" :can-enhance="canEnhance" @enhance="enhanceDraft" />
           <div 
             v-if="showTokenRing" 
             ref="ringRef"
@@ -484,7 +485,7 @@
             @click="send"
             class="action-btn send-btn"
             :class="{ active: canSend }"
-            :disabled="!canSend || disabled"
+            :disabled="!canSend || disabled || enhancement.busy"
             v-tip="'发送（Enter）'"
           >
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -556,6 +557,7 @@
 
 <script setup>
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
+import { usePromptEnhancement } from '../composables/usePromptEnhancement.js'
 import { uploadFile, deleteFile } from '../../../api/files.js'
 import { getWebSearchStatus, getUploadLimits } from '../../../api/settings.js'
 import { getUserSkills, importSkill } from '../../../api/skills.js'
@@ -585,6 +587,7 @@ import { emitConnectorsChanged, onConnectorsChanged } from '../../../utils/conne
 import { listExperts, listPublicExperts } from '../../../api/expert.js'
 import { expertAvatarChar, expertAvatarClass } from '../../../utils/expertAvatar.js'
 import { formatSize } from '../../../utils/format.js'
+import PromptEnhancementControls from './PromptEnhancementControls.vue'
 import SkillPicker from './SkillPicker.vue'
 import UploadTray from './UploadTray.vue'
 import ModelPicker from './ModelPicker.vue'
@@ -853,7 +856,6 @@ function syncMirror() {
   // 不加偏移：镜像的 padding-top 与负 margin-top 相互抵消，scrollTop 与 textarea 保持同值即可对齐
   mirror.scrollTop = ta.scrollTop
 }
-
 
 const skillPickerOpen = ref(false)
 const skillPickerIndex = ref(0)
@@ -1944,7 +1946,6 @@ function formatTokens(n) {
   return n.toString()
 }
 
-
 /**
  * 确保会话存在并返回 sessionId（并行上传共享同一个创建 Promise，
  * 避免一次选择多个文件时重复触发 createSession）。
@@ -2142,7 +2143,7 @@ async function removeFile(index) {
 }
 
 async function send() {
-  if (!canSend.value || props.disabled) return
+  if (!canSend.value || props.disabled || enhancement.value.busy) return
   
   // 等待所有文件上传完成
   const uploadingFiles = uploadedFiles.value.filter(f => f.uploadStatus === 'uploading')
@@ -2226,6 +2227,7 @@ function autoResize() {
 }
 
 function onInput(event) {
+  promptEnhancer.invalidate()
   const ta = event?.target || textareaRef.value
   // 移动端兜底（见 utils/skillPillTokens.js 的 reconcileTokenDeletion）：Android Chrome 的
   // Backspace 不给 keydown、部分浏览器也没有 beforeinput，浏览器只啃掉标签的一两个字时，
@@ -2261,6 +2263,11 @@ watch(() => props.disabled, (val) => {
   if (!val && textareaRef.value) {
     textareaRef.value.focus()
   }
+})
+
+const { enhancement, canEnhance, enhanceDraft, promptEnhancer } = usePromptEnhancement({
+  message, tokenMap, preselectedSkillDirs, props,
+  write: text => { message.value = text; nextTick(() => { autoResize(); textareaRef.value?.focus() }) },
 })
 
 onMounted(() => {
@@ -2309,6 +2316,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  promptEnhancer.dispose()
   document.removeEventListener('click', closeTokenPopup)
   document.removeEventListener('click', closeSkillPickerOnClick)
   window.removeEventListener('resize', handleViewportChange)
@@ -2322,6 +2330,7 @@ onUnmounted(() => {
 
 // 供父组件把预置问题完整文本填进输入框（卡片上最多显示 3 行，长问题展示不全）
 function setMessage(text) {
+  promptEnhancer.invalidate()
   message.value = text || ''
   nextTick(() => textareaRef.value?.focus())
 }
@@ -2366,7 +2375,6 @@ defineExpose({ setMessage, getMessage, triggerSend })
   border-color: #0ea5e9;
   box-shadow: 0 2px 12px rgba(14, 165, 233, 0.15);
 }
-
 
 /* ── 内联技能标签（`/显示名`，发送时整段剥掉，技能走 skills 字段） ── */
 /* 镜像渲染层：与 textarea 同字体/字号/行高/宽度，两侧文字换行位置才会逐行一致。
@@ -2453,7 +2461,6 @@ defineExpose({ setMessage, getMessage, triggerSend })
 .input-skill-pill:has(+ .input-skill-pill)::before {
   right: 11px;
 }
-
 
 .input-skill-pill:hover::before {
   background: color-mix(in srgb, var(--accent-color) 32%, var(--bg-secondary));
@@ -2583,7 +2590,6 @@ defineExpose({ setMessage, getMessage, triggerSend })
 }
 
 /* 连接器面板内的操作反馈条（改完开关提示一句） */
-
 
 html[data-theme="dark"] .skill-sub-notice {
   background: #27272a;
@@ -2801,15 +2807,6 @@ html[data-theme="dark"] .connector-switch.on {
 
 
 
-
-
-
-
-
-
-
-
-
 /* 失败卡片上的「重试」：仅可重试的失败（非单文件超限）才渲染 */
 
 
@@ -2976,6 +2973,8 @@ html[data-theme="dark"] .context-ring-wrapper {
 
 .input-actions {
   display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
   align-items: center;
   justify-content: space-between;
   padding: 8px 16px 12px;
@@ -3591,6 +3590,7 @@ html[data-theme="dark"] .plus-list-tag.custom {
 
 
 .right-actions {
+  margin-left: auto;
   display: flex;
   align-items: center;
   gap: 8px;

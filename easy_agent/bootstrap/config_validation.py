@@ -20,6 +20,7 @@ from easy_agent.bootstrap.config_models import (
     MySQLPoolConfig,
     PersonnelConfig,
     ProviderConfig,
+    PromptEnhancementConfig,
     RetryConfig,
     SQLiteConfig,
     SummarizationConfig,
@@ -52,6 +53,7 @@ KNOWN_TOP_LEVEL_KEYS = _fields(AgentConfig) | frozenset(
         "retry",
         "system_prompt_path",  # 旧键，兼容
         "summarization",
+        "prompt_enhancement",
         "tools",
         "web_search",
         "preset_questions",
@@ -87,6 +89,7 @@ KNOWN_SECTION_KEYS: dict[str, frozenset[str]] = {
     "database.mysql": _fields(MySQLConfig),
     "database.mysql.pool": _fields(MySQLPoolConfig),
     "summarization": _fields(SummarizationConfig),
+    "prompt_enhancement": _fields(PromptEnhancementConfig),
     "web_search": _fields(WebSearchConfig),
     "distributed_lock": _fields(DistributedLockConfig),
     "personnel": _fields(PersonnelConfig),
